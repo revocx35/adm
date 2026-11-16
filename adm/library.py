@@ -84,6 +84,39 @@ def root_of(path: str, allowed_roots: list[str]) -> Path:
     return p
 
 
+def suggest_folders(typed: str, allowed_roots: list[str], limit: int = 100) -> list[str]:
+    """Folders matching what was typed into a library path field, inside the allowed roots only.
+
+    "/libraries/mo" -> folders in /libraries starting with "mo"; "/libraries/media/" -> everything in it.
+    Nothing outside the roots is listed (checked on the real path, so a symlink can't lead out), hidden
+    names and symlinks are skipped. Anything else typed gives the roots themselves.
+    """
+    roots = [os.path.realpath(r) for r in allowed_roots]
+    typed = (typed or "").strip()
+    if len(typed) > 300 or "\x00" in typed or not typed.startswith("/") or "/.." in typed + "/":
+        typed = ""
+    parent, _, partial = typed.rpartition("/")
+    parent = parent or "/"
+    real = os.path.realpath(parent)
+    inside = any(real == r or real.startswith(r.rstrip("/") + "/") for r in roots)
+    if not typed or not inside:
+        return [r for r in allowed_roots if os.path.isdir(r) and r.lower().startswith(typed.lower())] or \
+            [r for r in allowed_roots if os.path.isdir(r)]
+    out = []
+    try:
+        entries = sorted(os.scandir(real), key=lambda e: e.name.lower())
+    except OSError:
+        return []
+    for e in entries:
+        if e.name.startswith(".") or e.is_symlink() or not e.is_dir(follow_symlinks=False):
+            continue
+        if e.name.lower().startswith(partial.lower()):
+            out.append(f"{parent.rstrip('/')}/{e.name}")
+            if len(out) >= limit:
+                break
+    return out
+
+
 def tree(root: Path, rel: str = "", depth: int = 1, limit: int = 400) -> dict:
     """The folder structure below root/rel: folders (with their entries down to `depth`) and files with sizes."""
     base = _inside(root, clean_rel(rel)) if rel.strip(" /") else root

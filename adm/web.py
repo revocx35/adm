@@ -492,6 +492,11 @@ def create_app(settings: Settings, files: tls.TlsFiles) -> FastAPI:
         store.save()
         return {"ok": True}
 
+    @app.get("/api/folders")
+    async def folders(path: str = ""):
+        """Folder suggestions for the library path field (admin only, confined to ADM_LIBRARY_ROOTS)."""
+        return {"folders": await asyncio.to_thread(library.suggest_folders, path[:400], settings.library_roots)}
+
     @app.get("/api/libraries/{lid}/tree")
     async def library_tree(lid: str, path: str = ""):
         x = store.library(lid)

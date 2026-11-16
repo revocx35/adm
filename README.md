@@ -46,7 +46,8 @@ Open `https://<host>:8450`, create the admin with the setup code, then:
 2. **Agent**: *ADM address for agents* — the `https://` address the agent machine uses to reach ADM. That name or
    IP must be in `ADM_TLS_NAMES` (ADM's self-signed certificate); the agent's Claude Code trusts ADM's CA
    automatically, and uploads pin ADM's key.
-3. **Libraries**: add a folder per library (kind movies / shows / books). Folders must be mounted into the container
+3. **Libraries**: add a folder per library (kind movies / shows / books); the folder field lists matching folders as
+   you type. Folders must be mounted into the container
    below `/libraries` and writable by uid 1000. Tick *Jellyfin library scan* for Jellyfin libraries and fill in
    *Settings → Jellyfin* (an API key from Jellyfin's dashboard).
 

@@ -82,3 +82,22 @@ def test_tree_and_find(tmp_path):
         library.tree(root, "../")
     big = library.tree(root, "Breaking Bad", depth=1, limit=0)
     assert big["truncated"] is True
+
+
+def test_folder_suggestions_stay_inside_the_roots(tmp_path):
+    lib = tmp_path / "libraries"
+    for d in ("media/movies", "media/tv", "Music", ".hidden", "books/library"):
+        (lib / d).mkdir(parents=True)
+    (lib / "media" / "notes.txt").write_text("x")
+    (tmp_path / "secret").mkdir()
+    os.symlink(tmp_path / "secret", lib / "sneaky")
+    roots = [str(lib)]
+    r = str(lib)
+    assert library.suggest_folders("", roots) == roots
+    assert library.suggest_folders("/etc", roots) == roots                  # outside: offer the roots
+    assert library.suggest_folders(f"{r}/m", roots) == [f"{r}/media", f"{r}/Music"]   # case-insensitive
+    assert library.suggest_folders(f"{r}/media/", roots) == [f"{r}/media/movies", f"{r}/media/tv"]
+    assert library.suggest_folders(f"{r}/", roots) == [f"{r}/books", f"{r}/media", f"{r}/Music"]   # no hidden, no symlink
+    assert library.suggest_folders(f"{r}/sneaky/", roots) == roots         # a symlink leading out lists nothing of it
+    assert library.suggest_folders(f"{r}/media/../../", roots) == roots
+    assert library.suggest_folders(str(tmp_path) + "/", roots) == roots      # the parent of the roots stays closed

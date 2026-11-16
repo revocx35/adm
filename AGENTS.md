@@ -29,7 +29,7 @@ The checkout folder may be called `agm` (an early typo of the name); the product
 
 ```bash
 docker build -t adm-dev -f Dockerfile.dev .
-docker run --rm -v $PWD:/src -w /src adm-dev python -m pytest -q        # ~3 s, 31 tests
+docker run --rm -v $PWD:/src -w /src adm-dev python -m pytest -q        # ~3 s, 33 tests
 docker build -t adm:dev .                                                # the runtime image
 docker run -d --name adm-test --network host --user 1000:1000 --read-only --tmpfs /tmp \
   -e ADM_HTTPS_PORT=18450 -e ADM_BIND=127.0.0.1 -e ADM_SETUP_CODE=TEST-CODE1 -v $PWD/scratch/data:/data adm:dev
@@ -79,7 +79,7 @@ Remove test containers when done. Host-specific rules (resource limits, hosts, m
 First version (owner: "make an new app named agentic download manager … the arr stack but agentic … connects to
 telerouter via an api … the agent accesses the media folder of the selected service (jellyfin for movie/shows and
 bookorbit for book) looks at the folder structure and adds the downloaded media with the same format").
-31 tests (auth paths, library confinement, the job flow with a fake telerouter, uploads with resume, nudges,
+33 tests (folder suggestions, auth paths, library confinement, the job flow with a fake telerouter, uploads with resume, nudges,
 cancel/retry, throttling). Verified end to end with a real Claude Code 2.1.325 (Sonnet 5.5, auto mode) against a
 running ADM container: it fetched *Alice's Adventures in Wonderland* (Project Gutenberg), read the book library,
 uploaded via the pinned curl command and imported it as `Lewis Carroll/Alice's Adventures in Wonderland (1865)/…epub`

@@ -106,3 +106,11 @@ def test_secrets_are_write_only(c):
     assert c.put("/api/settings", json={"telerouter": {"url": "http://tr.lan"}}, headers=h).status_code == 422
     assert c.put("/api/settings", json={"telerouter": {"token": "abc"}}, headers=h).status_code == 422
     assert c.put("/api/settings", json={"agent": {"adm_url": "http://x"}}, headers=h).status_code == 422
+
+
+def test_folder_suggestions_need_a_login(c, settings):
+    assert c.get("/api/folders?path=/").status_code == 401
+    setup_admin(c)
+    root = settings.library_roots[0]
+    r = c.get(f"/api/folders?path={root}/m").json()
+    assert r["folders"] == [f"{root}/movies"]

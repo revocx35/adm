@@ -102,6 +102,7 @@ telerouter token (it can start agent sessions), the Jellyfin API key.
 | Session theft / CSRF / clickjacking | server-side sessions in a `__Host-adm` cookie (Secure, HttpOnly, SameSite=Strict), rotated on login, idle + absolute timeouts, logout and password change delete them; CSRF token on every state change + Fetch-Metadata refusal; `X-Frame-Options: DENY` |
 | XSS | strict CSP (`script-src 'self'`, no inline script/style); DOM built with `textContent` only (titles, agent replies and the agent's screen are data) |
 | Secrets in the API | telerouter token and Jellyfin key are write-only (`*_set` flags); job/upload tokens never shown; no secret in URLs or logs |
+| The admin's folder suggestions reveal the file system | `GET /api/folders` needs the admin session, lists folders only (no files), only below `ADM_LIBRARY_ROOTS` (checked on the real path, symlinks and hidden names skipped, `..` refused) |
 | A rogue or confused agent writes outside the library | it has no file access to ADM's host; `import_media` confines paths (no `..`, symlinks, hidden names), allows only media types of the library kind and never overwrites; libraries must lie below `ADM_LIBRARY_ROOTS` (keeps `/data` out of reach) |
 | A leaked job/upload token | 256-bit, hashed, scoped to one request / one upload, dead when the job ends; bad tokens throttled per IP; `/mcp` refuses browser origins |
 | Upload abuse (disk filling) | announced size enforced, per-file cap (`ADM_MAX_UPLOAD_GB`), free-space check, ≤ 50 open uploads per request, staged files deleted when a job ends |

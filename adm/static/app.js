@@ -275,7 +275,7 @@ function libForm(l, roots) {
     el("div", { class: "form" },
       field("Name", el("input", { name: "name", value: l.name, placeholder: "e.g. Jellyfin movies" })),
       field("Kind", kindSel),
-      field("Folder in the container", el("input", { name: "path", value: l.path, class: "mono" })),
+      field("Folder in the container", folderInput(l.path), "Start typing: matching folders are listed (only below " + roots.join(", ") + ")."),
       field("After an import, start", ref),
       el("label", { class: "check field" }, el("input", { type: "checkbox", name: "enabled", checked: l.enabled }), "Enabled")),
     el("div", { class: "row" },
@@ -284,6 +284,28 @@ function libForm(l, roots) {
       el("button", { onclick: () => f.remove() }, "Close")));
   document.getElementById("libform").replaceChildren(f);
   f.scrollIntoView({ behavior: "smooth" });
+}
+
+// A path field that lists matching folders as you type (an <input> + <datalist>, no inline script).
+let folderListSeq = 0;
+function folderInput(value) {
+  const id = `folders-${++folderListSeq}`;
+  const list = el("datalist", { id });
+  const input = el("input", { name: "path", value, class: "mono", list: id, autocomplete: "off", spellcheck: "false" });
+  let timer = null, asked = "";
+  async function load() {
+    const typed = input.value;
+    if (typed === asked) return;
+    asked = typed;
+    try {
+      const r = await api("GET", `/api/folders?path=${encodeURIComponent(typed)}`);
+      if (input.value !== typed) return;              // an older answer: the user typed on
+      list.replaceChildren(...r.folders.map(f => el("option", { value: f })));
+    } catch (_) { /* suggestions are optional */ }
+  }
+  input.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(load, 150); });
+  input.addEventListener("focus", load);
+  return el("span", { class: "field" }, input, list);
 }
 
 async function browse(l, path) {
