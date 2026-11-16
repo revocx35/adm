@@ -54,6 +54,20 @@ The agent machine needs Claude Code logged in, `curl`, and whatever the agent sh
 `ffprobe` helps it check videos). Downloads land in the job folder (`~/adm-jobs/<request>` by default) and are
 deleted after the import.
 
+## Behind a reverse proxy / single sign-on
+
+ADM can sit behind a reverse proxy with forward auth (e.g. Authentik) for people. Agents must **not** go through it:
+give them the LAN address in *Settings → Agent → ADM address for agents*, and on the public name block the agent
+endpoints, e.g. in nginx:
+
+```nginx
+location /mcp     { return 404; }
+location /upload/ { return 404; }
+```
+
+Set `ADM_TRUSTED_PROXIES` to the proxy's address so login throttling sees the real client IPs. ADM's own login
+stays on as a second factor behind the proxy.
+
 ## Configuration (.env)
 
 | Variable | Default | |

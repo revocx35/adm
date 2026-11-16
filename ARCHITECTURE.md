@@ -108,6 +108,7 @@ telerouter token (it can start agent sessions), the Jellyfin API key.
 | A compromised ADM | it holds a telerouter `sessions` token: it can start agent sessions on machines where the owner allowed API sessions. Keep that to a dedicated agent machine/user; revoke the token in telerouter to cut ADM off |
 | Prompt injection from web pages the agent reads | the agent's own permission mode applies (telerouter's new-session setting, `auto` by default); its ADM tools can only touch this one request; it is told not to phone or message |
 | MITM | outbound TLS always verified (pinned private CAs for telerouter/Jellyfin, never `verify=False`), no redirects; agents trust ADM's CA for MCP and pin ADM's key for uploads |
+| Agent endpoints exposed on a public name | agents use the LAN address; the documented proxy setup returns 404 for `/mcp` and `/upload/` on the public host, and those endpoints accept only job/upload tokens anyway |
 | Container escape / privilege | uid 1000, read-only root, `cap_drop: ALL`, `no-new-privileges`, memory/pid limits |
 
 Not covered: what the agent downloads and from where is decided by the agent under the owner's guidance; ADM

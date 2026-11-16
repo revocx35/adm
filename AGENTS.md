@@ -85,4 +85,5 @@ running ADM container: it fetched *Alice's Adventures in Wonderland* (Project Gu
 uploaded via the pinned curl command and imported it as `Lewis Carroll/Alice's Adventures in Wonderland (1865)/…epub`
 matching the existing `Author/Title (Year)/Title (Year).ext` layout; the job token was refused right after
 completion. That run launched Claude Code directly with telerouter's per-session files (`claude -p`), not yet through a
-real telerouter tmux session. Not deployed anywhere yet.
+real telerouter tmux session. Deployed 2026-11-17 in the owner's homelab behind a reverse proxy with SSO
+(details in the git-ignored CLAUDE.local.md); not yet used for a real request there.
