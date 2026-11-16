@@ -16,6 +16,7 @@ def _list(v: str) -> list[str]:
 class Settings:
     data_dir: str = "/data"
     https_port: int = 8450
+    internal_port: int = 8451        # plain HTTP on 127.0.0.1 only: MCP + uploads for agents behind SSH tunnels
     bind: str = "0.0.0.0"
     tls_names: list[str] = field(default_factory=list)       # extra names/IPs for the self-signed certificate
     tls_cert: str = ""                                        # own certificate + key instead (PEM paths)
@@ -34,6 +35,7 @@ class Settings:
         return cls(
             data_dir=e("ADM_DATA_DIR", "/data"),
             https_port=int(e("ADM_HTTPS_PORT", "8450")),
+            internal_port=int(e("ADM_INTERNAL_PORT", "8451")),
             bind=e("ADM_BIND", "0.0.0.0"),
             tls_names=_list(e("ADM_TLS_NAMES", "")),
             tls_cert=e("ADM_TLS_CERT", ""),

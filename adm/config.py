@@ -134,9 +134,95 @@ class AgentSettings(BaseModel):
     max_concurrent: int = Field(default=2, ge=1, le=10)
     job_timeout_hours: float = Field(default=12, ge=0.25, le=72)
     max_nudges: int = Field(default=2, ge=0, le=5)        # "you stopped without finishing" reminders
-    keep_sessions: bool = False         # leave finished jobs' tmux sessions open (debugging)
+    keep_sessions: bool = False         # leave finished jobs' tmux sessions / job folders (debugging)
+    default_runner: str = Field(default="telerouter", max_length=16)   # "telerouter" or a machine id
+    telerouter_models: list[str] = Field(default_factory=list, max_length=20)   # suggestions for telerouter jobs
+
+    @field_validator("telerouter_models")
+    @classmethod
+    def _tm(cls, v: list[str]) -> list[str]:
+        return [m for m in (_model(x) for x in v) if m]
 
     _url = field_validator("adm_url")(classmethod(lambda cls, v: _https(v)))
+
+
+MODEL_RE = re.compile(r"^[A-Za-z0-9._:/\[\]@+-]{0,100}$")
+
+
+def _model(v: str) -> str:
+    v = v.strip()
+    if not MODEL_RE.match(v):
+        raise ValueError("model names: letters, digits and . _ : / [ ] @ + -")
+    return v
+
+
+class Machine(BaseModel):
+    """A machine ADM reaches over SSH itself and runs a one-off agent process on for each job (no tmux)."""
+    id: str = Field(default_factory=new_id)
+    name: str
+    host: str
+    port: int = Field(default=22, ge=1, le=65535)
+    username: str
+    host_key: str = ""                  # pinned OpenSSH public host key (fetched, confirmed by the admin)
+    kind: Literal["claude", "hermes"] = "claude"
+    default_model: str = ""             # "" = the agent's own default
+    models: list[str] = Field(default_factory=list, max_length=20)     # suggestions in the request form
+    permission_mode: Literal["default", "acceptEdits", "auto", "bypassPermissions", "dontAsk"] = "auto"  # Claude
+    hermes_provider: str = ""           # Hermes --provider ("" = its default)
+    hermes_yolo: bool = True            # Hermes: run tools without asking (nobody can answer a prompt)
+    folder: str = "~/adm-jobs"          # job folders are created below this
+    tunnel_port: int = Field(default=47900, ge=1024, le=65535)   # loopback port on the machine -> ADM
+    enabled: bool = True
+
+    @field_validator("name")
+    @classmethod
+    def _name(cls, v: str) -> str:
+        v = " ".join(v.split())
+        if not NAME_RE.match(v):
+            raise ValueError("1-64 characters, no control characters or < >")
+        return v
+
+    @field_validator("host")
+    @classmethod
+    def _host(cls, v: str) -> str:
+        v = v.strip()
+        if not re.match(r"^[A-Za-z0-9.\-:\[\]]{1,253}$", v):
+            raise ValueError("a host name or IP address")
+        return v
+
+    @field_validator("username")
+    @classmethod
+    def _user(cls, v: str) -> str:
+        v = v.strip()
+        if not re.match(r"^[a-z_][a-z0-9_.-]{0,31}$", v):
+            raise ValueError("a Unix user name")
+        return v
+
+    @field_validator("host_key")
+    @classmethod
+    def _hostkey(cls, v: str) -> str:
+        v = v.strip()
+        if v and not re.match(r"^(ssh-ed25519|ecdsa-sha2-nistp(256|384|521)|ssh-rsa) [A-Za-z0-9+/=]{40,1000}$", v):
+            raise ValueError("an OpenSSH public host key")
+        return v
+
+    @field_validator("default_model", "hermes_provider")
+    @classmethod
+    def _m(cls, v: str) -> str:
+        return _model(v)
+
+    @field_validator("models")
+    @classmethod
+    def _ms(cls, v: list[str]) -> list[str]:
+        return [m for m in (_model(x) for x in v) if m]
+
+    @field_validator("folder")
+    @classmethod
+    def _folder(cls, v: str) -> str:
+        v = " ".join(v.split()) or "~/adm-jobs"
+        if not re.match(r"^~?[A-Za-z0-9_./-]{1,150}$", v) or ".." in v.split("/") or v in ("~", "/", "~/"):
+            raise ValueError("a plain folder path without spaces, e.g. ~/adm-jobs")
+        return v.rstrip("/")
 
 
 class SecuritySettings(BaseModel):
@@ -150,6 +236,7 @@ class Config(BaseModel):
     telerouter: Telerouter = Field(default_factory=Telerouter)
     jellyfin: Jellyfin = Field(default_factory=Jellyfin)
     libraries: list[Library] = Field(default_factory=list, max_length=20)
+    machines: list[Machine] = Field(default_factory=list, max_length=20)
     agent: AgentSettings = Field(default_factory=AgentSettings)
     security: SecuritySettings = Field(default_factory=SecuritySettings)
 

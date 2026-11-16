@@ -79,15 +79,25 @@ class McpServer:
             raise ToolError(f"the library is not available right now: {e}") from e
         return lib, root
 
-    def _upload_url(self, uid: str) -> str:
-        return f"{self.st.store.config.agent.adm_url}/upload/{uid}"
+    def _base(self, job: dict) -> str:
+        """Where this job's agent reaches ADM: its SSH tunnel (http://127.0.0.1:port) or the configured address."""
+        # from the machine itself, not the job's saved runtime: the agent's first calls can arrive before ADM
+        # has stored the runtime of the turn it just started (that race once handed out an empty upload URL)
+        runner = job.get("runner") or "telerouter"
+        if runner != "telerouter":
+            m = next((x for x in self.st.store.config.machines if x.id == runner), None)
+            if m:
+                return f"http://127.0.0.1:{m.tunnel_port}"
+        return self.st.store.config.agent.adm_url
 
-    def _curl(self, uid: str, token: str, local_name: str) -> str:
-        """The upload command. With ADM's own certificate curl pins its key: the pin is checked on every
-        connection, and -k only skips the public-CA chain check a private certificate can't pass."""
-        url = self._upload_url(uid)
-        tls = (f"--pinnedpubkey {shlex.quote('sha256//' + self.st.spki_pin)} -k "
-               if self.st.spki_pin and not self.st.own_cert else "")
+    def _curl(self, base: str, uid: str, token: str, local_name: str) -> str:
+        """The upload command. Through an SSH tunnel: plain loopback HTTP (SSH encrypts it). With ADM's own
+        certificate: curl pins its key (checked on every connection; -k only skips the public-CA chain check a
+        private certificate can't pass). With an own certificate: normal verification."""
+        url = f"{base}/upload/{uid}"
+        tls = ""
+        if url.startswith("https://") and self.st.spki_pin and not self.st.own_cert:
+            tls = f"--pinnedpubkey {shlex.quote('sha256//' + self.st.spki_pin)} -k "
         return (f"curl --fail-with-body -sS {tls}-H {shlex.quote('Authorization: Bearer ' + token)} "
                 f"-T {shlex.quote(local_name)} {shlex.quote(url)}")
 
@@ -167,8 +177,9 @@ class McpServer:
             token = new_token("adu_")
             u = db.new_upload(job["id"], name, size, token_hash(token))
             db.event(job["id"], "progress", f"uploading {name} ({human(size)})")
-            return {"upload_id": u["id"], "url": self._upload_url(u["id"]),
-                    "command": self._curl(u["id"], token, name),
+            base = self._base(job)
+            return {"upload_id": u["id"], "url": f"{base}/upload/{u['id']}",
+                    "command": self._curl(base, u["id"], token, name),
                     "resume": "if it breaks off: upload_status, then the same command with "
                               "-C <received_bytes> to continue",
                     "then": "import_media(upload_id, path inside the library)"}
@@ -215,13 +226,13 @@ class McpServer:
         async def complete_request(job, summary: str):
             if not db.imports(job["id"]):
                 raise ToolError("nothing was imported yet: import_media first (or fail_request)")
-            await self.st.jobs.finish(job["id"], "done", summary=str(summary)[:4000])
+            await self.st.jobs.finish(job["id"], "done", summary=str(summary)[:4000], by_agent=True)
             return {"ok": True, "note": "thanks; delete the job folder's downloads now. ADM will close this session."}
 
         @tool("fail_request", "Give up on the request with the reason (nothing usable found, ...). Ends the job.",
               _obj({"reason": S}, ["reason"]))
         async def fail_request(job, reason: str):
-            await self.st.jobs.finish(job["id"], "failed", error=str(reason)[:2000])
+            await self.st.jobs.finish(job["id"], "failed", error=str(reason)[:2000], by_agent=True)
             return {"ok": True}
 
     # -- protocol -----------------------------------------------------------------------------------

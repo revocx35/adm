@@ -24,10 +24,12 @@ from starlette.requests import ClientDisconnect
 
 from . import library, security, tls
 from .app_state import State
-from .config import (AgentSettings, Admin, Jellyfin, Library, SecuritySettings, Telerouter, merge_secrets, redact)
+from .config import (AgentSettings, Admin, Jellyfin, Library, Machine, SecuritySettings, Telerouter, merge_secrets,
+                     redact)
 from .jobs import Jobs
 from .mcp import McpServer
 from .remote import RemoteError, TelerouterClient, jellyfin_check
+from .sshrun import SshError, fetch_host_key, fingerprint
 from .settings import Settings
 from .store import ACTIVE, FINISHED, ConfigStore, Db, write_private
 
@@ -66,6 +68,13 @@ class NewRequest(BaseModel):
     details: str = Field(default="", max_length=300)     # season/episodes, author, edition, language...
     notes: str = Field(default="", max_length=2000)
     library_id: str = Field(default="", max_length=16)
+    runner: str = Field(default="", max_length=16)          # "telerouter" or an agent machine id; "" = the default
+    model: str = Field(default="", max_length=100, pattern=r"^[A-Za-z0-9._:/\[\]@+-]*$")
+
+
+class HostKeyBody(BaseModel):
+    host: str = Field(min_length=1, max_length=253, pattern=r"^[A-Za-z0-9.\-:\[\]]+$")
+    port: int = Field(default=22, ge=1, le=65535)
 
 
 class MessageBody(BaseModel):
@@ -104,7 +113,7 @@ def _qr_data_url(text: str) -> str:
 
 
 def public_request(j: dict) -> dict:
-    return {k: v for k, v in j.items() if k not in ("token_hash",)}
+    return {k: v for k, v in j.items() if k not in ("token_hash", "runtime")}
 
 
 def create_app(settings: Settings, files: tls.TlsFiles) -> FastAPI:
@@ -371,7 +380,13 @@ def create_app(settings: Settings, files: tls.TlsFiles) -> FastAPI:
         title = " ".join(body.title.split())
         if any(ord(c) < 32 for c in title + body.details):
             raise HTTPException(422, "no control characters")
-        j = db.new_request(body.kind, title, body.year, " ".join(body.details.split()), body.notes.strip(), lib.id)
+        runner = body.runner or cfg.agent.default_runner or "telerouter"
+        if runner != "telerouter":
+            m = next((x for x in cfg.machines if x.id == runner), None)
+            if not m or not m.enabled:
+                raise HTTPException(422, "pick an agent machine that exists and is enabled")
+        j = db.new_request(body.kind, title, body.year, " ".join(body.details.split()), body.notes.strip(), lib.id,
+                           runner=runner, model=body.model.strip())
         log.info("request %s: %s '%s'", j["id"], body.kind, title)
         jobs.wake()
         return public_request(j)
@@ -380,7 +395,7 @@ def create_app(settings: Settings, files: tls.TlsFiles) -> FastAPI:
     async def get_request(rid: str, after: int = 0):
         j = find_req(rid)
         lib = store.library(j["library_id"])
-        return {"request": {**public_request(j), "library": lib.name if lib else "?"},
+        return {"request": {**public_request(j), "library": lib.name if lib else "?", "agent": jobs.agent_label(j)},
                 "events": db.events(rid, after), "imports": db.imports(rid),
                 "uploads": [{k: u[k] for k in ("id", "filename", "size", "received", "state")} for u in db.uploads(rid)]}
 
@@ -418,20 +433,21 @@ def create_app(settings: Settings, files: tls.TlsFiles) -> FastAPI:
     @app.post("/api/requests/{rid}/message")
     async def message_agent(rid: str, body: MessageBody):
         j = find_req(rid)
-        if j["state"] not in ACTIVE or not j["session_id"]:
+        if j["state"] not in ACTIVE or (j["runner"] == "telerouter" and not j["session_id"]):
             raise HTTPException(409, "no agent is working on this request")
         try:
-            async with jobs.client() as tr:
-                await tr.send(j["session_id"], f"[ADM, from the owner about request {rid}] {body.text.strip()}",
-                              timeout=int(min(cfg.agent.job_timeout_hours * 3600, 86_400)))
+            how = await jobs.message(j, body.text.strip())
         except RemoteError as e:
             raise HTTPException(409 if "wait for its answer" in str(e) else 502, str(e)) from e
-        db.event(rid, "owner", body.text.strip())
-        return {"ok": True}
+        db.event(rid, "owner", body.text.strip() + ("" if how == "sent" else f" ({how})"))
+        return {"ok": True, "how": how}
 
     @app.get("/api/requests/{rid}/screen")
     async def request_screen(rid: str):
         j = find_req(rid)
+        local = jobs.screen(j)
+        if local is not None:
+            return {"screen": local[-120_000:]}
         if not j["session_id"]:
             raise HTTPException(409, "no agent session")
         try:
@@ -508,6 +524,74 @@ def create_app(settings: Settings, files: tls.TlsFiles) -> FastAPI:
         except library.LibraryError as e:
             raise HTTPException(422, str(e)) from e
 
+    # -- agent machines (ADM's own SSH) ------------------------------------------------------------
+    def machine_info(m: Machine) -> dict:
+        return {**m.model_dump(), "host_key_fingerprint": fingerprint(m.host_key) if m.host_key else "",
+                **jobs.ssh.status(m)}
+
+    def find_machine(mid: str) -> Machine:
+        m = next((x for x in cfg.machines if x.id == mid), None)
+        if not m:
+            raise HTTPException(404, "no such machine")
+        return m
+
+    @app.get("/api/machines")
+    async def list_machines():
+        return {"machines": [machine_info(m) for m in cfg.machines], "public_key": jobs.ssh.keys.public,
+                "default_runner": cfg.agent.default_runner, "telerouter_models": cfg.agent.telerouter_models,
+                "telerouter_ready": bool(cfg.telerouter.url and cfg.telerouter.token)}
+
+    def check_machine(m: Machine) -> None:
+        if any(o.id != m.id and o.host == m.host and o.tunnel_port == m.tunnel_port for o in cfg.machines):
+            raise HTTPException(422, "another machine on that host uses the same tunnel port")
+
+    @app.post("/api/machines")
+    async def add_machine(payload: dict):
+        m = _validate(Machine, {k: v for k, v in payload.items() if k not in ("id", "connected", "error")})
+        check_machine(m)
+        cfg.machines.append(m)
+        store.save()
+        return machine_info(m)
+
+    @app.put("/api/machines/{mid}")
+    async def edit_machine(mid: str, payload: dict):
+        old = find_machine(mid)
+        data = {**old.model_dump(), **{k: v for k, v in payload.items() if k not in ("connected", "error")}, "id": mid}
+        m = _validate(Machine, data)
+        check_machine(m)
+        cfg.machines[cfg.machines.index(old)] = m
+        store.save()
+        await jobs.ssh._conn(m).close()          # reconnect with the new settings
+        return machine_info(m)
+
+    @app.delete("/api/machines/{mid}")
+    async def delete_machine(mid: str):
+        m = find_machine(mid)
+        if db.one("SELECT id FROM requests WHERE runner=? AND state IN ('queued','starting','working')", (mid,)):
+            raise HTTPException(409, "requests are still using it")
+        cfg.machines.remove(m)
+        if cfg.agent.default_runner == mid:
+            cfg.agent.default_runner = "telerouter"
+        store.save()
+        await jobs.ssh._conn(m).close()
+        return {"ok": True}
+
+    @app.post("/api/machines/hostkey")
+    async def machine_hostkey(body: HostKeyBody):
+        try:
+            key = await fetch_host_key(body.host, body.port)
+        except (OSError, SshError, TimeoutError, Exception) as e:
+            raise HTTPException(502, f"could not fetch the host key: {e.__class__.__name__}") from e
+        return {"host_key": key, "fingerprint": fingerprint(key)}
+
+    @app.post("/api/machines/{mid}/test")
+    async def machine_test(mid: str):
+        m = find_machine(mid)
+        try:
+            return {"ok": True, "message": await jobs.ssh.test(m)}
+        except SshError as e:
+            return {"ok": False, "message": str(e)}
+
     # -- settings ---------------------------------------------------------------------------------
     @app.get("/api/settings")
     async def get_settings(request: Request):
@@ -525,6 +609,9 @@ def create_app(settings: Settings, files: tls.TlsFiles) -> FastAPI:
                 continue
             old = getattr(cfg, name).model_dump()
             new[name] = _validate(cls, merge_secrets({**old, **part}, old))
+        ag = new.get("agent")
+        if ag and ag.default_runner != "telerouter" and not any(m.id == ag.default_runner for m in cfg.machines):
+            raise HTTPException(422, "the default agent must be telerouter or one of the agent machines")
         for name, value in new.items():
             setattr(cfg, name, value)
         store.save()
@@ -634,6 +721,14 @@ def create_app(settings: Settings, files: tls.TlsFiles) -> FastAPI:
                 db.event(j["id"], "progress", f"received {u['filename']}")
             return {"upload_id": uid, "received_bytes": size_now, "size": u["size"],
                     "state": "complete" if done else "open"}
+
+    # The loopback-only listener (plain HTTP, 127.0.0.1:ADM_INTERNAL_PORT) that SSH tunnels lead to: MCP and
+    # uploads only - no UI, no admin API.
+    internal = FastAPI(title="ADM agents", docs_url=None, redoc_url=None, openapi_url=None)
+    internal.add_api_route("/mcp", mcp_endpoint, methods=["GET", "POST", "DELETE"])
+    internal.add_api_route("/upload/{uid}", upload_status, methods=["GET"])
+    internal.add_api_route("/upload/{uid}", upload_put, methods=["PUT"])
+    app.state.internal = internal
 
     # -- UI ---------------------------------------------------------------------------------------
     @app.get("/")

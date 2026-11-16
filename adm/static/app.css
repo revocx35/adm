@@ -182,3 +182,7 @@ td, th { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line
   .ev { grid-template-columns: 52px 1fr; }
   .ev .k { display: none; }
 }
+.machine { padding: 8px 0; border-bottom: 1px solid var(--line); }
+.machine:last-of-type { border-bottom: 0; }
+.machine .hint { flex-basis: 100%; margin: 0; }
+pre.term { white-space: pre-wrap; word-break: break-all; }

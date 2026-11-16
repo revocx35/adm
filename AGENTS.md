@@ -18,8 +18,11 @@ adm/
   store.py      config.json + SQLite     security.py  argon2/TOTP/throttle/sessions (from telerouter)
   tls.py        local CA (from telerouter)  web.py    FastAPI app + routes       jobs.py    job loop + prompt
   mcp.py        agents' MCP tools        library.py   path checks, tree, place   remote.py  telerouter + Jellyfin clients
+  sshrun.py     ADM's own SSH runner (keys, pinned host keys, reverse tunnel, detached turns, stream-json)
   static/       index.html, app.js, app.css, icon.svg (vanilla JS)
-tests/          pytest: test_auth.py, test_library.py, test_jobs.py (fake telerouter via httpx.MockTransport)
+tests/          pytest: test_auth.py, test_library.py, test_jobs.py (fake telerouter via httpx.MockTransport),
+                test_ssh.py (FakeSsh replaces jobs.ssh)
+tools/fake-agent/  disposable SSH host with stand-in `claude`/`hermes` (stream-json, real MCP + curl) for SSH e2e
 assets/icon.svg brand mark (same as adm/static/icon.svg)
 ```
 
@@ -29,7 +32,7 @@ The checkout folder may be called `agm` (an early typo of the name); the product
 
 ```bash
 docker build -t adm-dev -f Dockerfile.dev .
-docker run --rm -v $PWD:/src -w /src adm-dev python -m pytest -q        # ~3 s, 33 tests
+docker run --rm -v $PWD:/src -w /src adm-dev python -m pytest -q        # ~5 s, 42 tests
 docker build -t adm:dev .                                                # the runtime image
 docker run -d --name adm-test --network host --user 1000:1000 --read-only --tmpfs /tmp \
   -e ADM_HTTPS_PORT=18450 -e ADM_BIND=127.0.0.1 -e ADM_SETUP_CODE=TEST-CODE1 -v $PWD/scratch/data:/data adm:dev
@@ -63,6 +66,17 @@ Remove test containers when done. Host-specific rules (resource limits, hosts, m
 - Remove "Don't phone, message or announce anything" from the prompt: the agent host's own instructions may tell the
   agent to phone the owner when work is done.
 
+## Gotchas (SSH runner)
+
+- The agent runs the moment `start_turn` launches it: anything it can call (MCP) must not depend on runtime ADM stores
+  afterwards. `McpServer._base` derives the tunnel URL from the machine; `Jobs._save_turn` merges `cleanup_after` /
+  `owner_messages` that arrived meanwhile, and `_start_ssh` doesn't flip a finished job back to working.
+- `setsid nohup sh run.sh &` from a non-interactive shell: the background child is no group leader, so setsid doesn't
+  fork and `$!` is the agent's pid = its process group (`kill -- -pid`).
+- Hermes keeps MCP servers only in config.yaml: never edit the user's; the job's HERMES_HOME links everything else.
+- e2e: `docker build -t adm-fake-agent tools/fake-agent`, run it with `--network host -e SSH_PORT=2222
+  -e AUTHORIZED_KEY=...`, run ADM with `ADM_INTERNAL_PORT` set, add machines with distinct tunnel ports.
+
 ## Gotchas
 
 - The Debian base image already has a group called `adm`: the container user is `admapp` (uid 1000).
@@ -74,7 +88,17 @@ Remove test containers when done. Host-specific rules (resource limits, hosts, m
   `complete_request` inside that turn, so `_check` re-reads the request before nudging.
 - `TestClient.portal.call(jobs.tick)` runs a tick on the app's loop; tests patch `Jobs.start` so no background loop races.
 
-## Status (0.1.0, 2026-11-16)
+## Status (0.2.0, 2026-11-17)
+
+0.2.0 (owner: "add support for independent agents than telerouter so the ADM sshs into the machine itself and creates an
+session (not tmux since its an temporary session) also ... hermes agent and model selection"): agent machines over
+ADM's own SSH (Claude Code or Hermes, detached turns, reverse tunnel), agent + model per request, model passed to
+telerouter (>= 0.18). 42 tests. End to end over real SSH against tools/fake-agent (host-key pinning, tunnel, detached
+processes, MCP + curl uploads through the tunnel, reminders resuming the session, cleanup, the generated Hermes config);
+the flags were checked against the real Claude Code 2.1.325 `--help` and Hermes 0.22.4's source. Not yet run with a
+real Claude Code or Hermes over ADM's SSH (needs ADM's key on an agent machine).
+
+## 0.1.0 (2026-11-16)
 
 First version (owner: "make an new app named agentic download manager … the arr stack but agentic … connects to
 telerouter via an api … the agent accesses the media folder of the selected service (jellyfin for movie/shows and

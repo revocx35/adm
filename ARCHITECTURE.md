@@ -63,6 +63,33 @@ queued ──(free slot, settings complete)──▶ starting ──(telerouter:
 5. **Library scan**: an import into a library with *Jellyfin library scan* schedules one `POST /Library/Refresh`
    30 s later (several files → one scan).
 
+## 2.1 ADM's own SSH runner (`sshrun.py`)
+
+For agent machines (`config.Machine`) ADM is the one that connects: asyncssh with ADM's ed25519 key (`/data/ssh`,
+0600) and the machine's host key pinned (fetched once, confirmed by fingerprint). One connection per machine, keepalive
+20 s x 9, re-made on demand; it holds a **reverse tunnel** `127.0.0.1:<tunnel_port>` on the machine -> ADM's loopback-only
+HTTP listener (`ADM_INTERNAL_PORT`, `app.state.internal`: only `/mcp` and `/upload/{id}`). The agent's MCP and upload
+URLs are `http://127.0.0.1:<tunnel_port>/...` (derived from the job's machine, never from saved state: the agent's first
+call can arrive before the turn's runtime is stored).
+
+A **turn** is a detached process: `.adm/run-N.sh` started with `setsid nohup`, writing the agent's stream-json to
+`.adm/out-N.jsonl`, stderr to `err-N.log`, its status to `exit-N`; the pid is the process group. It survives ADM
+restarts and lost connections. Every tick ADM runs one SSH command per job: alive?, exit code, the new bytes from the
+stored offset (whole lines only). Events of both agents are rendered into the request page's "agent session" lines
+(`render`); the turn ends with the `result` event (text, session id) or with the process gone (crash: stderr tail).
+Then, like telerouter turns: the owner's queued messages start the next turn, else a reminder (`max_nudges`), else the
+job fails. Next turns resume the agent's session (`claude --resume <uuid>` with the uuid ADM chose via `--session-id`;
+`hermes chat --resume <id>` from Hermes' result event).
+
+| | Claude Code | Hermes |
+|---|---|---|
+| launch | `claude -p --output-format stream-json --verbose --strict-mcp-config --mcp-config .adm/mcp.json --settings .adm/settings.json [--model] [--permission-mode] --session-id/--resume`, prompt on stdin | `HERMES_HOME=.adm/hermes-home hermes chat --query-file .adm/prompt-N.txt --oneshot --format stream-json [--model] [--provider] [--yolo] [--resume]` |
+| ADM's MCP server | `.adm/mcp.json` (bearer job token, 0600); `permissions.allow: mcp__adm`; other MCP servers off | the job's `HERMES_HOME`: symlinks to everything in `~/.hermes` except `config.yaml`, which is a copy with `mcp_servers` = only `adm` and `hooks` removed (written by Hermes' own Python, which has PyYAML) |
+
+**Ending**: cancel/timeout stop the process group at once; when the *agent* ends the job (`complete_request` /
+`fail_request`) ADM lets its turn finish (up to 3 min, `cleanup_after`), reads its last output, then stops it and removes
+the job folder (`keep_sessions`: only `.adm`, which holds the token and configs).
+
 ## 3. Uploads
 
 `start_upload(filename, size)` checks the file type for the library kind, the size cap and free space (size + 2 GB),
@@ -82,7 +109,10 @@ the final name, which fails instead of overwriting.
 
 | Decision | Why |
 |---|---|
-| Agents come from telerouter, not from ADM's own SSH | one place that owns machines, host keys, tmux and Claude Code's dialogs; the owner sees ADM's sessions on telerouter's tmux page |
+| Agents from telerouter **or** ADM's own SSH | telerouter owns machines, host keys, tmux and Claude Code's dialogs, and the owner watches sessions there; ADM's own SSH needs no telerouter, runs Hermes too (telerouter can't give Hermes a per-session MCP server) and uses a short-lived process instead of a tmux session |
+| SSH runner: detached process + stream-json file, not an SSH channel | a channel dies with ADM's connection; the file survives restarts and is read from an offset |
+| SSH runner: reverse tunnel to a loopback listener | the agent machine needs no route to ADM and no CA trust (Hermes trusts only the OS store), and the token never crosses the LAN in clear |
+| Agents come from telerouter, not from ADM's own SSH (0.1) | one place that owns machines, host keys, tmux and Claude Code's dialogs; the owner sees ADM's sessions on telerouter's tmux page |
 | The agent talks to ADM through MCP + HTTPS uploads, never a shared file system | the agent machine needs no access to the libraries; every write is checked by ADM (path, type, no overwrite) |
 | One token per job, one per upload | a leaked token reaches one request (or one file) and dies with it; the upload token is in the agent's transcript, the job token only in a 0600 file |
 | The agent reads the library structure and names files itself | libraries differ (flat shows, `Season N/` folders, author folders); copying what exists beats a fixed naming scheme |
@@ -110,6 +140,10 @@ telerouter token (it can start agent sessions), the Jellyfin API key.
 | Prompt injection from web pages the agent reads | the agent's own permission mode applies (telerouter's new-session setting, `auto` by default); its ADM tools can only touch this one request; it is told not to phone or message |
 | MITM | outbound TLS always verified (pinned private CAs for telerouter/Jellyfin, never `verify=False`), no redirects; agents trust ADM's CA for MCP and pin ADM's key for uploads |
 | Agent endpoints exposed on a public name | agents use the LAN address; the documented proxy setup returns 404 for `/mcp` and `/upload/` on the public host, and those endpoints accept only job/upload tokens anyway |
+| ADM's SSH key (it can log in to agent machines) | generated in ADM, private half only in `/data/ssh` (0600, uid 1000); the owner decides where the public half goes; host keys pinned (no trust on first use); use a dedicated user on the agent machine |
+| Tunnel listener abused | bound to 127.0.0.1 in the container (the SSH tunnel is the only way in), serves only `/mcp` and `/upload/{id}`, both need job/upload tokens; on the agent machine the tunnel port is loopback-only too |
+| Command injection via machine settings | admin-only; host, user, model, provider and folder validated by strict patterns; every value shell-quoted; job folders must match `<folder>/r_<10 hex>` before `rm -rf` |
+| A job's agent reads other secrets | Claude: `--strict-mcp-config` (the user's other MCP servers, e.g. telerouter's phone token, are not loaded); Hermes: the job config has only ADM's server and no hooks (credentials are the user's own, as for any Hermes run) |
 | Container escape / privilege | uid 1000, read-only root, `cap_drop: ALL`, `no-new-privileges`, memory/pid limits |
 
 Not covered: what the agent downloads and from where is decided by the agent under the owner's guidance; ADM
@@ -117,6 +151,8 @@ checks file types and placement, not content or licensing.
 
 ## 6. Platform constraints
 
-- Claude Code is required on the agent machine for per-session MCP servers (telerouter refuses them for Hermes).
+- With telerouter, Claude Code is required (telerouter refuses per-session MCP servers for Hermes); with ADM's own SSH,
+  Claude Code or Hermes Agent (Hermes needs a Python with PyYAML - its own interpreter has it).
+- SSH runner: the agent machine needs `curl`, the agent logged in for that user, and a free loopback tunnel port.
 - The agent machine must reach `adm_url` (HTTPS) and have `curl`.
 - Library mounts must be writable by uid 1000 (NFS: map uid 1000).

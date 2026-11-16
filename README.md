@@ -40,7 +40,8 @@ docker logs adm 2>&1 | grep 'setup code'
 
 Open `https://<host>:8450`, create the admin with the setup code, then:
 
-1. **telerouter** (0.17 or newer): *Agents & machines → edit the machine → Apps may start agent sessions here*, and
+1. **An agent** - either telerouter or ADM's own SSH (see *Two ways to run the agent* below). For **telerouter** (0.17 or newer;
+   0.18 for a model per request): *Agents & machines → edit the machine → Apps may start agent sessions here*, and
    *MCP access → New token* with **start agent sessions**. In ADM *Settings → telerouter*: its URL, the token and
    telerouter's CA (`https://<telerouter>:8443/ca.pem`). *Save & test* lists the machines.
 2. **Agent**: *ADM address for agents* — the `https://` address the agent machine uses to reach ADM. That name or
@@ -54,6 +55,28 @@ Open `https://<host>:8450`, create the admin with the setup code, then:
 The agent machine needs Claude Code logged in, `curl`, and whatever the agent should use to download (it decides;
 `ffprobe` helps it check videos). Downloads land in the job folder (`~/adm-jobs/<request>` by default) and are
 deleted after the import.
+
+## Two ways to run the agent
+
+| | telerouter | ADM's own SSH ("agent machines") |
+|---|---|---|
+| Session | a tmux session telerouter starts (watch it on telerouter's tmux page) | a one-off background process per job, no tmux |
+| Agents | Claude Code | Claude Code **or Hermes Agent** |
+| How the agent reaches ADM | ADM's address (`https://…`, ADM's CA trusted by the agent) | an SSH reverse tunnel: `http://127.0.0.1:<port>` on the agent's machine, no route or certificate needed |
+| Model | optional per request (telerouter ≥ 0.18), else the machine's new-session model | per request, else the machine's default model |
+
+**Agent machines** (*Settings → Agent machines → Add machine*): host, SSH user, Claude Code or Hermes, a default model
+and model suggestions, permission mode (Claude Code) or provider/`--yolo` (Hermes), job folder and tunnel port. Add
+ADM's public SSH key (shown there) to that user's `~/.ssh/authorized_keys`, then *Fetch & confirm host key* (compare the
+fingerprint) and *Test*. The agent must be logged in on that machine for that user.
+
+Each job runs in `<job folders>/<request id>/`: Claude Code as `claude -p --output-format stream-json` with only ADM's
+MCP server (`--strict-mcp-config`); Hermes as `hermes chat --oneshot --format stream-json` with its own temporary
+`HERMES_HOME` (your `~/.hermes` linked in, `config.yaml` copied with only ADM's MCP server and without hooks; your own
+Hermes config is never changed). Reminders and your messages continue the same agent session. The job folder is deleted
+when the job ends (*Keep finished jobs' sessions and job folders* keeps it, minus the job's secrets).
+
+In the request form pick the **Agent** and type or pick a **Model**; *Settings → Agent → Default agent* sets the default.
 
 ## Behind a reverse proxy / single sign-on
 
@@ -75,6 +98,7 @@ stays on as a second factor behind the proxy.
 |---|---|---|
 | `ADM_TLS_NAMES` | — | extra names/IPs for the certificate (the address agents use) |
 | `ADM_HTTPS_PORT` | 8450 | |
+| `ADM_INTERNAL_PORT` | 8451 | loopback-only HTTP inside the container that ADM's SSH tunnels lead to (MCP + uploads) |
 | `ADM_SETUP_CODE` | random, logged | first-run code |
 | `ADM_TRUSTED_PROXIES` | — | reverse proxies (CIDRs) whose `X-Forwarded-For` is trusted |
 | `ADM_TLS_CERT` / `ADM_TLS_KEY` | — | your own certificate instead of the self-signed one |

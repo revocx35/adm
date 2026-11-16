@@ -133,8 +133,21 @@ function route() {
 
 // -- requests --------------------------------------------------------------------------------------
 async function pageRequests(main) {
-  const [data, libs] = await Promise.all([api("GET", "/api/requests"), api("GET", "/api/libraries")]);
+  const [data, libs, ms] = await Promise.all([api("GET", "/api/requests"), api("GET", "/api/libraries"), api("GET", "/api/machines")]);
   let kind = "movies";
+  const agents = [];
+  if (ms.telerouter_ready || ms.default_runner === "telerouter") agents.push({ id: "telerouter", label: "telerouter (tmux session)", models: ms.telerouter_models, def: "" });
+  for (const m of ms.machines.filter(x => x.enabled)) agents.push({ id: m.id, label: `${m.name} · ${m.kind === "hermes" ? "Hermes" : "Claude Code"} over SSH`, models: m.models, def: m.default_model });
+  const runnerSel = el("select", { name: "runner" }, agents.map(a => el("option", { value: a.id, selected: a.id === ms.default_runner }, a.label)));
+  const modelList = el("datalist", { id: "model-list" });
+  const modelIn = el("input", { name: "model", list: "model-list", autocomplete: "off", spellcheck: "false" });
+  function setRunner() {
+    const a = agents.find(x => x.id === runnerSel.value) || { models: [], def: "" };
+    const opts = [...new Set([a.def, ...(a.models || [])].filter(Boolean))];
+    modelList.replaceChildren(...opts.map(m => el("option", { value: m })));
+    modelIn.placeholder = a.def ? `default: ${a.def}` : "agent's default";
+  }
+  runnerSel.addEventListener("change", setRunner);
   const libSel = el("select", { name: "library_id" });
   const details = el("input", { name: "details" });
   const detailsLabel = el("span", { class: "label" });
@@ -153,6 +166,8 @@ async function pageRequests(main) {
     field("Year", el("input", { name: "year", inputmode: "numeric", maxlength: "4", placeholder: "optional" })),
     el("label", { class: "field" }, detailsLabel, details),
     field("Library", libSel),
+    field("Agent", agents.length ? runnerSel : el("span", { class: "hint" }, "Set up telerouter or add an agent machine under Settings.")),
+    field("Model", el("span", { class: "field" }, modelIn, modelList), "Pick a suggestion or type any model name; empty = the default."),
     field("Notes for the agent", el("textarea", { name: "notes", placeholder: "language, quality, edition, sources to prefer…" }), null, true),
     el("div", { class: "row field wide" }, el("button", { class: "primary", type: "submit" }, "Request"), el("span", { class: "hint" }, "An agent session searches, downloads and files it into the library.")));
   form.onsubmit = async e => {
@@ -162,6 +177,7 @@ async function pageRequests(main) {
     location.hash = `#/request/${r.id}`;
   };
   setKind(kind);
+  setRunner();
   const c = data.counts;
   const list = el("div", { class: "reqs" }, data.requests.length ? data.requests.map(reqRow) : el("p", { class: "muted" }, "No requests yet."));
   main.replaceChildren(el("h1", {}, "Requests"),
@@ -205,7 +221,7 @@ async function pageRequestImpl(main, rid) {
       ["failed", "cancelled"].includes(r.state) ? el("button", { onclick: async () => { await act(() => api("POST", `/api/requests/${rid}/retry`), "Queued again"); route(); } }, "Retry") : null,
       ["done", "failed", "cancelled"].includes(r.state) ? el("button", { class: "danger", onclick: async () => { if (confirm("Delete this request from the list? Imported files stay in the library.")) { await act(() => api("DELETE", `/api/requests/${rid}`)); location.hash = "#/requests"; } } }, "Delete") : null,
       el("span", { class: "spacer" }),
-      r.session_name ? el("span", { class: "hint" }, `tmux session ${r.session_name}`) : null));
+      el("span", { class: "hint" }, r.agent || "")));
 
   const evs = el("div", { class: "timeline" });
   let lastEv = 0;
@@ -223,10 +239,10 @@ async function pageRequestImpl(main, rid) {
 
   const term = el("pre", { class: "term" }, "…");
   const msgIn = el("input", { placeholder: "Tell the agent something (e.g. prefer the 1080p release)" });
-  const agentPanel = r.session_id ? el("div", { class: "panel" },
+  const agentPanel = (r.session_id || (r.runner !== "telerouter" && r.started)) ? el("div", { class: "panel" },
     el("div", { class: "row" }, el("h2", {}, "Agent session"), el("span", { class: "spacer" }), el("span", { class: "hint" }, active ? "live, refreshes every 4 s" : "last screen")),
     term,
-    active ? el("form", { class: "row", onsubmit: async e => { e.preventDefault(); if (!msgIn.value.trim()) return; await act(() => api("POST", `/api/requests/${rid}/message`, { text: msgIn.value }), "Sent"); msgIn.value = ""; } },
+    active ? el("form", { class: "row", onsubmit: async e => { e.preventDefault(); if (!msgIn.value.trim()) return; const res = await act(() => api("POST", `/api/requests/${rid}/message`, { text: msgIn.value })); toast(res.how === "sent" ? "Sent" : "Queued: the agent gets it when its current turn ends"); msgIn.value = ""; } },
       el("div", { class: "spacer" }, msgIn), el("button", { type: "submit" }, "Send")) : null) : null;
 
   async function loadScreen() {
@@ -328,7 +344,7 @@ async function browse(l, path) {
 
 // -- settings --------------------------------------------------------------------------------------
 async function pageSettings(main) {
-  const s = await api("GET", "/api/settings");
+  const [s, ms] = await Promise.all([api("GET", "/api/settings"), api("GET", "/api/machines")]);
   const tr = s.telerouter, jf = s.jellyfin, ag = s.agent;
   const trBox = el("div", { class: "form" },
     field("telerouter URL", el("input", { name: "url", value: tr.url, placeholder: "https://telerouter.lan:8443" })),
@@ -341,7 +357,11 @@ async function pageSettings(main) {
     field("Jellyfin URL", el("input", { name: "url", value: jf.url, placeholder: "https://jellyfin.example" })),
     field("API key", el("input", { name: "api_key", type: "password", autocomplete: "off", placeholder: jf.api_key_set ? "saved - leave empty to keep" : "Dashboard → API keys" })),
     field("Jellyfin's CA certificate (PEM)", el("textarea", { name: "ca_pem", class: "pem", placeholder: "only for a private certificate" }, jf.ca_pem), null, true));
+  const runnerOpts = [["telerouter", "telerouter (tmux session)"], ...ms.machines.map(m => [m.id, `${m.name} (SSH)`])];
   const agBox = el("div", { class: "form" },
+    field("Default agent for new requests", el("select", { name: "default_runner" }, runnerOpts.map(([v, t]) => el("option", { value: v, selected: v === ag.default_runner }, t)))),
+    field("Model suggestions for telerouter jobs", el("input", { name: "telerouter_models", value: (ag.telerouter_models || []).join(", "), placeholder: "e.g. claude-sonnet-5-5, claude-opus-5-5" }),
+      "Comma-separated. Empty model = the machine's new-session model in telerouter."),
     field("ADM address for agents", el("input", { name: "adm_url", value: ag.adm_url, placeholder: s.suggested_adm_url }),
       "How the agent's machine reaches this ADM (MCP + uploads). Its host name or IP must be in ADM's certificate (ADM_TLS_NAMES)."),
     field("Jobs at the same time", el("input", { name: "max_concurrent", type: "number", min: "1", max: "10", value: ag.max_concurrent })),
@@ -349,19 +369,83 @@ async function pageSettings(main) {
     field("Reminders when the agent stops early", el("input", { name: "max_nudges", type: "number", min: "0", max: "5", value: ag.max_nudges })),
     field("Guidance for every job", el("textarea", { name: "guidance", placeholder: "Which sources to use, preferred quality/size, languages, subtitles, formats (e.g. EPUB over PDF)…" }, ag.guidance),
       "Added to every task the agent gets.", true),
-    el("label", { class: "check field" }, el("input", { type: "checkbox", name: "keep_sessions", checked: ag.keep_sessions }), "Keep finished jobs' tmux sessions open (debugging)"));
+    el("label", { class: "check field" }, el("input", { type: "checkbox", name: "keep_sessions", checked: ag.keep_sessions }), "Keep finished jobs' sessions and job folders (debugging)"));
   const out = el("p", { class: "hint" });
   async function save() {
-    const body = { telerouter: formData(trBox), jellyfin: formData(jfBox), agent: formData(agBox) };
+    const agent = formData(agBox);
+    agent.telerouter_models = splitList(agent.telerouter_models);
+    const body = { telerouter: formData(trBox), jellyfin: formData(jfBox), agent };
     await act(() => api("PUT", "/api/settings", body), "Saved");
   }
   async function test(what) { await save(); const r = await act(() => api("POST", `/api/settings/test/${what}`)); out.textContent = r.message; toast(r.message, !r.ok); }
   main.replaceChildren(el("h1", {}, "Settings"),
     el("div", { class: "panel" }, el("h2", {}, "telerouter (agent sessions)"), trBox, el("div", { class: "row" }, el("button", { onclick: () => test("telerouter") }, "Save & test"))),
+    machinesPanel(ms),
     el("div", { class: "panel" }, el("h2", {}, "Agent"), agBox),
     el("div", { class: "panel" }, el("h2", {}, "Jellyfin (library scans)"), jfBox, el("div", { class: "row" }, el("button", { onclick: () => test("jellyfin") }, "Save & test"))),
     el("div", { class: "row" }, el("button", { class: "primary", onclick: save }, "Save"), out),
     el("p", { class: "hint mono" }, `ADM CA SHA-256: ${s.ca_sha256}`));
+}
+
+function splitList(v) { return String(v || "").split(/[,\s]+/).map(x => x.trim()).filter(Boolean); }
+
+function machinesPanel(ms) {
+  const rows = ms.machines.map(m => el("div", { class: "row machine" },
+    el("span", { class: "badge " + (m.connected ? "done" : m.error ? "failed" : "") }, m.connected ? "connected" : m.error ? "error" : "idle"),
+    el("b", {}, m.name), el("span", { class: "muted" }, `${m.username}@${m.host}:${m.port} · ${m.kind === "hermes" ? "Hermes" : "Claude Code"}${m.default_model ? " · " + m.default_model : ""}${m.enabled ? "" : " · disabled"}`),
+    el("span", { class: "spacer" }),
+    el("button", { onclick: async () => { const r = await act(() => api("POST", `/api/machines/${m.id}/test`)); toast(r.message, !r.ok); } }, "Test"),
+    el("button", { onclick: () => machineForm(m) }, "Edit"),
+    m.error ? el("p", { class: "hint" }, m.error) : null));
+  return el("div", { class: "panel" }, el("h2", {}, "Agent machines (ADM connects over SSH itself)"),
+    el("p", { class: "muted" }, "Each job runs as a one-off agent process on the machine (no tmux), in its own job folder. The agent reaches ADM through ADM's SSH tunnel, so the machine needs no route or certificate for ADM."),
+    el("div", { class: "field wide" }, el("span", { class: "label" }, "ADM's SSH key - add it to ~/.ssh/authorized_keys of the user on each machine"),
+      el("pre", { class: "term" }, ms.public_key)),
+    ...rows, el("div", { id: "machineform" }),
+    el("div", { class: "row" }, el("button", { onclick: () => machineForm(null) }, "Add machine")));
+}
+
+function machineForm(m) {
+  const isNew = !m;
+  m = m || { name: "", host: "", port: 22, username: "root", host_key: "", kind: "claude", default_model: "", models: [], permission_mode: "auto",
+    hermes_provider: "", hermes_yolo: true, folder: "~/adm-jobs", tunnel_port: 47900, enabled: true };
+  let hostKey = m.host_key;
+  const fp = el("span", { class: "hint" }, m.host_key ? `Host key: ${m.host_key_fingerprint}` : "Host key not confirmed yet.");
+  const sel = (name, value, opts) => el("select", { name }, opts.map(([v, t]) => el("option", { value: v, selected: v === value }, t)));
+  const f = el("div", { class: "panel" }, el("h2", {}, isNew ? "Add agent machine" : `Edit ${m.name}`),
+    el("div", { class: "form" },
+      field("Name", el("input", { name: "name", value: m.name, placeholder: "e.g. claude LXC" })),
+      field("SSH host", el("input", { name: "host", value: m.host, placeholder: "192.168.1.20" })),
+      field("SSH port", el("input", { name: "port", type: "number", value: m.port })),
+      field("SSH user", el("input", { name: "username", value: m.username })),
+      field("Agent", sel("kind", m.kind, [["claude", "Claude Code"], ["hermes", "Hermes Agent"]])),
+      field("Default model", el("input", { name: "default_model", value: m.default_model, placeholder: "empty = the agent's default" })),
+      field("Model suggestions", el("input", { name: "models", value: (m.models || []).join(", "), placeholder: "claude-sonnet-5-5, claude-opus-5-5" }), "Comma-separated; shown in the request form."),
+      field("Permission mode (Claude Code)", sel("permission_mode", m.permission_mode, [["auto", "auto"], ["acceptEdits", "acceptEdits"], ["bypassPermissions", "bypassPermissions"], ["dontAsk", "dontAsk"], ["default", "default (asks - nobody answers)"]])),
+      field("Provider (Hermes)", el("input", { name: "hermes_provider", value: m.hermes_provider, placeholder: "empty = Hermes' default" })),
+      field("Job folders", el("input", { name: "folder", value: m.folder })),
+      field("Tunnel port on the machine", el("input", { name: "tunnel_port", type: "number", value: m.tunnel_port }), "A free loopback port there; the agent reaches ADM at http://127.0.0.1:<port>."),
+      el("label", { class: "check field" }, el("input", { type: "checkbox", name: "hermes_yolo", checked: m.hermes_yolo }), "Hermes: run tools without asking (--yolo)"),
+      el("label", { class: "check field" }, el("input", { type: "checkbox", name: "enabled", checked: m.enabled }), "Enabled")),
+    el("div", { class: "row" }, el("button", { onclick: async () => {
+      const d = formData(f);
+      const r = await act(() => api("POST", "/api/machines/hostkey", { host: d.host, port: d.port }));
+      if (confirm(`Trust this SSH host key for ${d.host}?\n\n${r.fingerprint}\n\nCompare it with: ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub (on that machine)`)) {
+        hostKey = r.host_key; fp.textContent = `Host key: ${r.fingerprint} (saved when you press Save)`;
+      }
+    } }, "Fetch & confirm host key"), fp),
+    el("div", { class: "row" },
+      el("button", { class: "primary", onclick: async () => {
+        const d = formData(f);
+        d.models = splitList(d.models); d.host_key = hostKey;
+        if (!d.host_key) { toast("Confirm the host key first", true); return; }
+        await act(() => isNew ? api("POST", "/api/machines", d) : api("PUT", `/api/machines/${m.id}`, d), "Saved");
+        route();
+      } }, "Save"),
+      isNew ? null : el("button", { class: "danger", onclick: async () => { if (confirm(`Remove ${m.name}?`)) { await act(() => api("DELETE", `/api/machines/${m.id}`), "Removed"); route(); } } }, "Remove"),
+      el("button", { onclick: () => f.remove() }, "Close")));
+  document.getElementById("machineform").replaceChildren(f);
+  f.scrollIntoView({ behavior: "smooth" });
 }
 
 // -- account ---------------------------------------------------------------------------------------

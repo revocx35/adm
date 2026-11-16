@@ -95,6 +95,11 @@ class Db:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.executescript(SCHEMA)
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(requests)")}
+        for col, ddl in (("runner", "TEXT NOT NULL DEFAULT 'telerouter'"), ("model", "TEXT NOT NULL DEFAULT ''"),
+                         ("runtime", "TEXT NOT NULL DEFAULT '{}'")):
+            if col not in cols:             # databases made by 0.1
+                self.conn.execute(f"ALTER TABLE requests ADD COLUMN {col} {ddl}")
         self.lock = threading.Lock()
         os.chmod(path, 0o600)
 
@@ -112,11 +117,13 @@ class Db:
             return cur.lastrowid or cur.rowcount
 
     # -- requests ---------------------------------------------------------------------------------
-    def new_request(self, kind: str, title: str, year: str, details: str, notes: str, library_id: str) -> dict:
+    def new_request(self, kind: str, title: str, year: str, details: str, notes: str, library_id: str,
+                    runner: str = "telerouter", model: str = "") -> dict:
         rid = "r_" + secrets.token_hex(5)
         now = time.time()
-        self.x("INSERT INTO requests (id, kind, title, year, details, notes, library_id, state, created, updated) "
-               "VALUES (?,?,?,?,?,?,?,'queued',?,?)", (rid, kind, title, year, details, notes, library_id, now, now))
+        self.x("INSERT INTO requests (id, kind, title, year, details, notes, library_id, state, created, updated, "
+               "runner, model) VALUES (?,?,?,?,?,?,?,'queued',?,?,?,?)",
+               (rid, kind, title, year, details, notes, library_id, now, now, runner, model))
         self.event(rid, "state", "queued")
         return self.request(rid)
 
@@ -134,6 +141,16 @@ class Db:
         kw["updated"] = time.time()
         cols = ", ".join(f"{k}=?" for k in kw)
         self.x(f"UPDATE requests SET {cols} WHERE id=?", (*kw.values(), rid))
+
+    def runtime(self, rid: str) -> dict:
+        r = self.one("SELECT runtime FROM requests WHERE id=?", (rid,))
+        try:
+            return json.loads(r["runtime"]) if r else {}
+        except ValueError:
+            return {}
+
+    def set_runtime(self, rid: str, rt: dict) -> None:
+        self.update(rid, runtime=json.dumps(rt))
 
     def by_token(self, token_hash: str) -> dict | None:
         if not token_hash:
