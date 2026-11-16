@@ -36,7 +36,7 @@ docker run -d --name adm-test --network host --user 1000:1000 --read-only --tmpf
 # UI screenshots: mcr.microsoft.com/playwright/python:v1.55.0-noble (pip install playwright==1.55.0)
 ```
 
-Heavy jobs on the owner's dev host go through `/usr/local/bin/heavy`, one at a time; remove test containers after.
+Remove test containers when done. Host-specific rules (resource limits, hosts, mounts) are in the git-ignored `CLAUDE.local.md`.
 
 ## Conventions
 
