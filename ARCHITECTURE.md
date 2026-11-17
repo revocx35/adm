@@ -72,7 +72,9 @@ HTTP listener (`ADM_INTERNAL_PORT`, `app.state.internal`: only `/mcp` and `/uplo
 URLs are `http://127.0.0.1:<tunnel_port>/...` (derived from the job's machine, never from saved state: the agent's first
 call can arrive before the turn's runtime is stored).
 
-A **turn** is a detached process: `.adm/run-N.sh` started with `setsid nohup`, writing the agent's stream-json to
+A **turn** is a detached process: `.adm/run-N.sh` started with `setsid -f` (all descriptors redirected; the script
+writes `.adm/pid-N`, its pid = the process group; a start whose answer is lost is resolved from that file and a live
+pid is adopted, never started twice), writing the agent's stream-json to
 `.adm/out-N.jsonl`, stderr to `err-N.log`, its status to `exit-N`; the pid is the process group. It survives ADM
 restarts and lost connections. Every tick ADM runs one SSH command per job: alive?, exit code, the new bytes from the
 stored offset (whole lines only). Events of both agents are rendered into the request page's "agent session" lines
@@ -83,7 +85,7 @@ job fails. Next turns resume the agent's session (`claude --resume <uuid>` with 
 
 | | Claude Code | Hermes |
 |---|---|---|
-| launch | `claude -p --output-format stream-json --verbose --strict-mcp-config --mcp-config .adm/mcp.json --settings .adm/settings.json [--model] [--permission-mode] --session-id/--resume`, prompt on stdin | `HERMES_HOME=.adm/hermes-home hermes chat --query-file .adm/prompt-N.txt --oneshot --format stream-json [--model] [--provider] [--yolo] [--resume]` |
+| launch | `claude -p --output-format stream-json --verbose --strict-mcp-config --mcp-config .adm/mcp.json --settings .adm/settings.json [--model] [--permission-mode] --session-id/--resume`, prompt on stdin | (switched off since 0.3.1: `hermes chat` hands the turn to the user's running gateway, which ignores the job's HERMES_HOME config) `HERMES_HOME=.adm/hermes-home hermes chat --query-file .adm/prompt-N.txt --oneshot --format stream-json [--model] [--provider] [--yolo] [--resume]` |
 | ADM's MCP server | `.adm/mcp.json` (bearer job token, 0600); `permissions.allow: mcp__adm`; other MCP servers off | the job's `HERMES_HOME`: symlinks to everything in `~/.hermes` except `config.yaml`, which is a copy with `mcp_servers` = only `adm` and `hooks` removed (written by Hermes' own Python, which has PyYAML) |
 
 **Models** (`SshRunner.models`, `POST /api/machines/{id}/models`, stored as `available_models` /

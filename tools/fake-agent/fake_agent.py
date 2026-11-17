@@ -48,6 +48,10 @@ def call(name, **a):
     return res["structuredContent"]
 
 
+if "SLOW AGENT" in prompt:              # notes say so: work for 40 s first (longer than a launch may take)
+    import time
+    emit({"type": "text", "text": "Working slowly on purpose."})
+    time.sleep(40)
 if "STOP EARLY" in prompt:            # a request whose notes say so: end the turn without finishing (reminder test)
     emit({"type": "text", "text": "I stopped early on purpose."})
     emit({"type": "result", "session_id": session, "result": "stopped early", "text": "stopped early", "exit_code": 0})

@@ -32,7 +32,7 @@ The checkout folder may be called `agm` (an early typo of the name); the product
 
 ```bash
 docker build -t adm-dev -f Dockerfile.dev .
-docker run --rm -v $PWD:/src -w /src adm-dev python -m pytest -q        # ~5 s, 49 tests
+docker run --rm -v $PWD:/src -w /src adm-dev python -m pytest -q        # ~8 s, 53 tests
 docker build -t adm:dev .                                                # the runtime image
 docker run -d --name adm-test --network host --user 1000:1000 --read-only --tmpfs /tmp \
   -e ADM_HTTPS_PORT=18450 -e ADM_BIND=127.0.0.1 -e ADM_SETUP_CODE=TEST-CODE1 -v $PWD/scratch/data:/data adm:dev
@@ -71,8 +71,17 @@ Remove test containers when done. Host-specific rules (resource limits, hosts, m
 - The agent runs the moment `start_turn` launches it: anything it can call (MCP) must not depend on runtime ADM stores
   afterwards. `McpServer._base` derives the tunnel URL from the machine; `Jobs._save_turn` merges `cleanup_after` /
   `owner_messages` that arrived meanwhile, and `_start_ssh` doesn't flip a finished job back to working.
-- `setsid nohup sh run.sh &` from a non-interactive shell: the background child is no group leader, so setsid doesn't
-  fork and `$!` is the agent's pid = its process group (`kill -- -pid`).
+- **Launching a turn (0.3.1)**: `cmd &` + `echo $!` over SSH left a bash subshell holding the exec channel open while
+  the agent ran; the call timed out after 30 s, the job was re-queued and started again - three copies of one Hermes job
+  on 2026-11-17. The fake agent finished in <1 s and hid it. Now `setsid -f sh run-N.sh` with every fd redirected, the
+  script writes `.adm/pid-N` itself (its pid = the process group), a lost answer is resolved by reading the pid file,
+  and turn 1 adopts a live pid instead of starting another. A timed-out command no longer drops the connection (that
+  took the agents' tunnel down). e2e: the fake agent's `SLOW AGENT` note works for 40 s.
+- **Hermes 0.22 `hermes chat` is a gateway client** (`--format stream-json` always goes through
+  `launch_gateway_chat`): with the user's gateway running, the job's turn runs *inside that gateway with the gateway's
+  config* - not the job's HERMES_HOME config, so no ADM tools and the user's MCP servers instead. Killing the client only
+  detaches ("accepted work continues at the gateway"). Hermes jobs are refused (`Jobs._start`/`_check_ssh`) until a job
+  can run isolated from that gateway.
 - Hermes keeps MCP servers only in config.yaml: never edit the user's; the job's HERMES_HOME links everything else.
 - e2e: `docker build -t adm-fake-agent tools/fake-agent`, run it with `--network host -e SSH_PORT=2222
   -e AUTHORIZED_KEY=...`, run ADM with `ADM_INTERNAL_PORT` set, add machines with distinct tunnel ports.
@@ -88,7 +97,12 @@ Remove test containers when done. Host-specific rules (resource limits, hosts, m
   `complete_request` inside that turn, so `_check` re-reads the request before nudging.
 - `TestClient.portal.call(jobs.tick)` runs a tick on the app's loop; tests patch `Jobs.start` so no background loop races.
 
-## Status (0.3.0, 2026-11-17)
+## Status (0.3.1, 2026-11-17)
+
+0.3.1 (owner: "i got an timeout error"): the first real Hermes job started three times (see the launch gotcha) and ran
+inside the owner's Hermes gateway. Launch fixed (detached, pid file, adopt, no re-start), Hermes jobs switched off with
+an explanation. 53 tests; a 40-s fake agent over real SSH with bash as login shell starts exactly once.
+
 
 0.3.0 (owner: "an default model setting for each machine ... the default for adm only not the hermes/claude code
 default and it should have an list off all available models on claude code/hermes"): *Load models from the machine*

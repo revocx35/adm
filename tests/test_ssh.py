@@ -124,11 +124,19 @@ def test_request_runs_over_ssh_with_the_chosen_model(c, tmp_path):
     assert "list_library" in c.get(f"/api/requests/{rid}/screen").json()["screen"]
 
 
-def test_default_model_reminders_and_owner_messages(c, tmp_path):
+def test_hermes_jobs_are_refused_for_now(c, tmp_path):
     h, fake, m = setup(c, tmp_path, kind="hermes")
     rid = c.post("/api/requests", headers=h, json={"kind": "movies", "title": "Dune", "runner": m["id"]}).json()["id"]
     tick(c)
-    assert fake.turns[0]["model"] == "claude-sonnet-5-5" and fake.turns[0]["kind"] == "hermes"
+    j = c.get(f"/api/requests/{rid}").json()["request"]
+    assert j["state"] == "failed" and "gateway" in j["error"] and fake.turns == []
+
+
+def test_default_model_reminders_and_owner_messages(c, tmp_path):
+    h, fake, m = setup(c, tmp_path)
+    rid = c.post("/api/requests", headers=h, json={"kind": "movies", "title": "Dune", "runner": m["id"]}).json()["id"]
+    tick(c)
+    assert fake.turns[0]["model"] == "claude-sonnet-5-5" and fake.turns[0]["kind"] == "claude"
     # the owner writes while the agent works: queued for the next turn
     r = c.post(f"/api/requests/{rid}/message", json={"text": "prefer 1080p"}, headers=h).json()
     assert r["how"].startswith("queued")
@@ -312,7 +320,10 @@ async def test_hermes_launch_line_uses_provider_and_model(tmp_path):
         if cmd.startswith("umask 077; cat >"):
             written[cmd.split("> ")[1].split(".tmp")[0].strip("'")] = input
             return 0, "", ""
-        if "echo $!" in cmd:
+        if "kill -0" in cmd:
+            return 0, "", ""                       # no turn of this job running yet
+        if "setsid -f" in cmd:
+            assert ">/dev/null 2>&1 < /dev/null" in cmd and "&" not in cmd.replace("2>&1", "").replace("&&", "")
             return 0, "4242\n", ""
         if "import yaml" in cmd:
             return 0, "python3\n", ""
@@ -329,3 +340,60 @@ async def test_hermes_launch_line_uses_provider_and_model(tmp_path):
     await r.start_turn(m, "r_0123456789", rt, "go on", "", "gpt-5.4")
     assert "--model gpt-5.4 --provider deepseek" in written["/root/adm-jobs/r_0123456789/.adm/run-2.sh"]
     assert "--resume h-1" in written["/root/adm-jobs/r_0123456789/.adm/run-2.sh"]
+
+
+async def test_a_turn_that_is_already_running_is_adopted(tmp_path):
+    r = sshrun.SshRunner(str(tmp_path), 1)
+    m = Machine(name="x", host="h", username="root", kind="claude")
+    cmds = []
+
+    class C:
+        home = "/root"
+
+        async def get(self, mm):
+            return None
+    r.conns[m.id] = C()
+
+    async def sh(mm, cmd, input=None, timeout=30):
+        cmds.append(cmd)
+        if "kill -0" in cmd:
+            return 0, "777\n", ""                 # the previous start's agent is alive
+        return 0, "", ""
+    r.sh = sh
+    rt = await r.start_turn(m, "r_0123456789", {}, "find it", "adj_x", "")
+    assert rt["pid"] == 777 and rt["turn"] == 1
+    assert not any("setsid" in c for c in cmds)         # nothing new was started
+
+
+async def test_launch_lost_answer_reads_the_pid_file(tmp_path):
+    r = sshrun.SshRunner(str(tmp_path), 1)
+    m = Machine(name="x", host="h", username="root", kind="claude")
+
+    class C:
+        home = "/root"
+
+        async def get(self, mm):
+            return None
+    r.conns[m.id] = C()
+
+    async def sh(mm, cmd, input=None, timeout=30):
+        if "kill -0" in cmd:
+            return 0, "", ""
+        if "setsid -f" in cmd:
+            raise sshrun.SshError("x: a command took over 20 s")
+        if cmd.startswith("cat ") and "pid-1" in cmd:
+            return 0, "4343\n", ""
+        return 0, "", ""
+    r.sh = sh
+    rt = await r.start_turn(m, "r_0123456789", {}, "find it", "adj_x", "")
+    assert rt["pid"] == 4343
+
+
+def test_a_running_hermes_job_from_before_is_closed(c, tmp_path):
+    h, fake, m = setup(c, tmp_path, kind="hermes")
+    st = c.app.state.st
+    j = st.db.new_request("movies", "Dune", "", "", "", st.store.config.libraries[0].id, runner=m["id"])
+    st.db.update(j["id"], state="starting", started=__import__("time").time())
+    tick(c)
+    r = c.get(f"/api/requests/{j['id']}").json()["request"]
+    assert r["state"] == "failed" and "switched off" in r["error"]

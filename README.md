@@ -61,7 +61,7 @@ deleted after the import.
 | | telerouter | ADM's own SSH ("agent machines") |
 |---|---|---|
 | Session | a tmux session telerouter starts (watch it on telerouter's tmux page) | a one-off background process per job, no tmux |
-| Agents | Claude Code | Claude Code **or Hermes Agent** |
+| Agents | Claude Code | Claude Code (Hermes Agent: switched off for now, see below) |
 | How the agent reaches ADM | ADM's address (`https://…`, ADM's CA trusted by the agent) | an SSH reverse tunnel: `http://127.0.0.1:<port>` on the agent's machine, no route or certificate needed |
 | Model | optional per request (telerouter ≥ 0.18), else the machine's new-session model | per request, else the machine's default model |
 
@@ -75,6 +75,11 @@ MCP server (`--strict-mcp-config`); Hermes as `hermes chat --oneshot --format st
 `HERMES_HOME` (your `~/.hermes` linked in, `config.yaml` copied with only ADM's MCP server and without hooks; your own
 Hermes config is never changed). Reminders and your messages continue the same agent session. The job folder is deleted
 when the job ends (*Keep finished jobs' sessions and job folders* keeps it, minus the job's secrets).
+
+**Hermes Agent is switched off for now.** Hermes 0.22's `hermes chat` hands every conversation to the running Hermes
+gateway, which uses its own settings, so a job would not get ADM's tools (and would get the gateway's tool connections
+instead). ADM refuses Hermes jobs with that explanation until a job can run isolated from the gateway. Loading
+Hermes' models still works.
 
 **Models**: *Load models from the machine* asks the agent there what it offers - Claude Code: the model names the
 installed version knows (newest first, plus `opus`/`sonnet`/`haiku`); Hermes: the models of every provider you are

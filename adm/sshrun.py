@@ -223,6 +223,9 @@ class SshRunner:
         conn = await self._conn(m).get(m)
         try:
             res = await asyncio.wait_for(conn.run(cmd, input=input, check=False), timeout)
+        except TimeoutError as e:
+            # a slow command is no broken connection: keep it (and the tunnel the agents use)
+            raise SshError(f"{m.name}: a command took over {timeout:.0f} s") from e
         except (OSError, asyncssh.Error) as e:
             await self._conn(m).close()
             raise SshError(f"{m.name}: {short(e)}") from e
@@ -319,6 +322,14 @@ class SshRunner:
             raise SshError(f"could not create {d} on {m.name}: {err.strip()[:200]}")
         base = f"http://127.0.0.1:{m.tunnel_port}"
         rt["base"] = base
+        # a turn of this job may already be running (a start whose answer got lost): adopt it, never start another
+        _c, live, _e = await self.sh(m, f"p=$(cat {q(a)}/pid-{n} 2>/dev/null) && kill -0 \"$p\" 2>/dev/null && echo \"$p\"")
+        if live.strip().isdigit():
+            log.warning("job %s: turn %d is already running on %s (pid %s) - adopting it", rid, n, m.name, live.strip())
+            rt.update(turn=n, pid=int(live.strip()), started=time.time())
+            rt.setdefault("offset", 0)
+            rt.setdefault("screen", [])
+            return rt
         await self._write(m, f"{a}/prompt-{n}.txt", prompt)
         if m.kind == "claude":
             if n == 1:
@@ -350,15 +361,27 @@ class SshRunner:
                 args += ["--resume", rt["session"]]
             env = f"HERMES_HOME={q(home)}; export HERMES_HOME; "
         stdin = f" < .adm/prompt-{n}.txt" if m.kind == "claude" else " < /dev/null"
-        script = (f"#!/bin/sh\n{PATHS}\ncd {q(d)} || exit 1\n{env}\n"
+        script = (f"#!/bin/sh\n{PATHS}\ncd {q(d)} || exit 1\necho $$ > .adm/pid-{n}\n{env}\n"
                   f"{' '.join(q(x) for x in args)}{stdin} > .adm/out-{n}.jsonl 2> .adm/err-{n}.log\n"
                   f"echo $? > .adm/exit-{n}\n")
         await self._write(m, f"{a}/run-{n}.sh", script, 0o700)
-        code, out, err = await self.sh(m, f"cd {q(d)} && setsid nohup sh .adm/run-{n}.sh >/dev/null 2>&1 < /dev/null & "
-                                          f"echo $!")
+        # Fully detached: `setsid -f` forks, the child starts a new session (its pid = the process group) and every
+        # descriptor is redirected, so nothing holds the SSH channel open. (`cmd &` + `echo $!` left a subshell holding
+        # the channel under bash: the call timed out, the job was re-queued and started again - 3 copies on 2026-11-17.)
+        # The script writes its own pid; if this call times out anyway, the pid file decides - never start twice.
+        launch = (f"cd {q(d)} && rm -f .adm/pid-{n} && setsid -f sh .adm/run-{n}.sh >/dev/null 2>&1 < /dev/null; "
+                  f"for i in $(seq 1 50); do [ -s .adm/pid-{n} ] && break; sleep 0.1; done; cat .adm/pid-{n} 2>/dev/null")
+        try:
+            code, out, err = await self.sh(m, launch, timeout=20)
+        except SshError as e:
+            code, out, err = 1, "", str(e)
         pid = out.strip()
-        if code or not pid.isdigit():
-            raise SshError(f"could not start the agent on {m.name}: {err.strip()[:200]}")
+        if not pid.isdigit():
+            await asyncio.sleep(2)
+            _c, out2, _e = await self.sh(m, f"cat {q(d)}/.adm/pid-{n} 2>/dev/null")
+            pid = out2.strip()
+        if not pid.isdigit():
+            raise SshError(f"could not start the agent on {m.name}: {err.strip()[:200] or 'no pid'}")
         rt.update(turn=n, pid=int(pid), offset=0, started=time.time())
         rt.setdefault("screen", [])
         rt["screen"] = (rt["screen"] + [f"── turn {n} ({'Claude Code' if m.kind == 'claude' else 'Hermes'}"
