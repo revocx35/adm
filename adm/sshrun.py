@@ -70,6 +70,44 @@ for p in "$py" python3; do [ -n "$p" ] && "$p" -c "import yaml" 2>/dev/null && {
 exit 4'''
 
 
+# Claude Code: the model names the installed CLI knows (it is one binary or one JS bundle), and the user's own default.
+CLAUDE_MODELS_SH = r'''b=$(command -v claude) || exit 9
+b=$(readlink -f "$b")
+grep -aoE 'claude-(opus|sonnet|haiku|fable)-[0-9]+(-[0-9]+)?(\[1m\])?' "$b" | sort -u
+echo "ADM-DEFAULT $(sed -n 's/^[[:space:]]*"model"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$HOME/.claude/settings.json" 2>/dev/null | head -1)"'''
+
+# Hermes: its own picker code (providers the user has credentials for, their models, the current default), run in
+# Hermes' runtime through `hermes --run-module code` (the interactive console reading this one line from stdin).
+HERMES_MODELS_PY = r'''
+import json, io, contextlib
+with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+    from hermes_cli.config import load_config
+    from hermes_cli.model_switch import list_authenticated_providers
+    cfg = load_config() or {}
+    m = cfg.get("model") or {}
+    m = m if isinstance(m, dict) else {"default": str(m)}
+    provs = list_authenticated_providers(current_provider=m.get("provider") or "", current_base_url=m.get("base_url") or "",
+                                         user_providers=cfg.get("providers"), custom_providers=cfg.get("custom_providers"),
+                                         max_models=500, current_model=m.get("default") or "", non_blocking_catalogs=True,
+                                         probe_custom_providers=False)
+print("ADM-MODELS " + json.dumps({"provider": m.get("provider") or "", "model": m.get("default") or "",
+      "providers": [{"slug": p.get("slug"), "current": bool(p.get("is_current")),
+                     "models": [x if isinstance(x, str) else (x.get("id") or x.get("name") or "") for x in (p.get("models") or [])]}
+                    for p in provs]}))
+'''
+
+
+def claude_model_key(name: str):
+    """Newest first: fable > opus > sonnet > haiku within a version; dated ids and 1M variants after their base."""
+    mt = re.match(r"^claude-(opus|sonnet|haiku|fable)-(\d+)(?:-(\d+))?(\[1m\])?$", name)
+    if not mt:
+        return (1, 0, 0, 9, name)
+    fam, major, minor, big = mt.group(1), int(mt.group(2)), int(mt.group(3) or 0), bool(mt.group(4))
+    dated = minor > 99
+    order = {"fable": 0, "opus": 1, "sonnet": 2, "haiku": 3}[fam]
+    return (0, -major, (0 if dated else -minor), order * 2 + big + (10 if dated else 0), name)
+
+
 class SshError(Exception):
     pass
 
@@ -215,6 +253,42 @@ class SshRunner:
                                "Hermes config")
         return f"connected; {version}; tunnel 127.0.0.1:{m.tunnel_port} -> ADM is up"
 
+    async def models(self, m: Machine) -> dict:
+        """What the agent on the machine offers: {"models": [...], "providers": [...], "agent_default": "..."}.
+        Hermes models are "provider:model" (a Hermes model only works with its provider)."""
+        if m.kind == "claude":
+            code, out, err = await self.sh(m, f"{PATHS}; {CLAUDE_MODELS_SH}", timeout=60)
+            if code == 9:
+                raise SshError(f"`claude` is not installed for {m.username} on {m.name}")
+            names, default = set(), ""
+            for line in out.splitlines():
+                line = line.strip()
+                if line.startswith("ADM-DEFAULT"):
+                    default = line[len("ADM-DEFAULT"):].strip()
+                elif re.match(r"^claude-[a-z]+-[0-9][0-9\-\[\]a-z]*$", line):
+                    mt = re.match(r"^claude-[a-z]+-\d+-(\d+)", line)
+                    if mt and 10 <= int(mt.group(1)) < 10_000_000:
+                        continue                 # a fragment of a longer name inside the binary (e.g. "-3-55")
+                    names.add(line)
+            models = ["opus", "sonnet", "haiku"] + sorted(names, key=claude_model_key)
+            return {"models": models, "providers": [], "agent_default": default}
+        line = "exec(" + repr(HERMES_MODELS_PY) + ")\n"
+        code, out, err = await self.sh(m, f"{PATHS}; cd /tmp && timeout 150 hermes --run-module code 2>/dev/null",
+                                       input=line, timeout=180)
+        hit = re.search(r"ADM-MODELS (\{.*\})", out)
+        if not hit:
+            raise SshError(f"could not read Hermes' model list on {m.name}" + (f": {err.strip()[-200:]}" if err.strip() else ""))
+        d = json.loads(hit.group(1))
+        models, providers = [], []
+        for p in d.get("providers") or []:
+            slug = str(p.get("slug") or "")
+            if not slug:
+                continue
+            providers.append(slug)
+            models += [f"{slug}:{x}" for x in p.get("models") or [] if x]
+        cur = f"{d['provider']}:{d['model']}" if d.get("provider") and d.get("model") else str(d.get("model") or "")
+        return {"models": models, "providers": providers, "agent_default": cur}
+
     # -- jobs -------------------------------------------------------------------------------------
     async def job_dir(self, m: Machine, rid: str) -> str:
         c = self._conn(m)
@@ -265,10 +339,11 @@ class SshRunner:
             if n == 1:
                 await self._hermes_home(m, home, f"{base}/mcp", token)
             args = ["hermes", "chat", "--query-file", f".adm/prompt-{n}.txt", "--oneshot", "--format", "stream-json"]
-            if model:
-                args += ["--model", model]
-            if m.hermes_provider:
-                args += ["--provider", m.hermes_provider]
+            provider, hmodel = m.split_model(model)
+            if hmodel:
+                args += ["--model", hmodel]
+            if provider:
+                args += ["--provider", provider]
             if m.hermes_yolo:
                 args += ["--yolo"]
             if n > 1 and rt.get("session"):

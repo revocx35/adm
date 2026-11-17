@@ -86,6 +86,16 @@ job fails. Next turns resume the agent's session (`claude --resume <uuid>` with 
 | launch | `claude -p --output-format stream-json --verbose --strict-mcp-config --mcp-config .adm/mcp.json --settings .adm/settings.json [--model] [--permission-mode] --session-id/--resume`, prompt on stdin | `HERMES_HOME=.adm/hermes-home hermes chat --query-file .adm/prompt-N.txt --oneshot --format stream-json [--model] [--provider] [--yolo] [--resume]` |
 | ADM's MCP server | `.adm/mcp.json` (bearer job token, 0600); `permissions.allow: mcp__adm`; other MCP servers off | the job's `HERMES_HOME`: symlinks to everything in `~/.hermes` except `config.yaml`, which is a copy with `mcp_servers` = only `adm` and `hooks` removed (written by Hermes' own Python, which has PyYAML) |
 
+**Models** (`SshRunner.models`, `POST /api/machines/{id}/models`, stored as `available_models` /
+`hermes_providers` / `agent_default` on the machine): Claude Code has no list command, so ADM greps the installed
+CLI (one binary or JS bundle) for `claude-<family>-<n>[-<n>][1m]` and drops fragments of longer names; the user's own
+default comes from `~/.claude/settings.json`. Hermes' list comes from its own picker code
+(`hermes_cli.model_switch.list_authenticated_providers`: providers with credentials and their models, cache-only) run
+inside Hermes' runtime via `hermes --run-module code` with one `exec(...)` line on stdin; nothing is written. A Hermes
+model is `provider:model` (`Machine.split_model`: the prefix counts only if it is a known provider slug, since model
+ids can contain `:`); the machine's *Provider* setting applies to bare model names. ADM's `default_model` is only
+ADM's: passed per job as `--model` (and `--provider`), never written into the agent's config.
+
 **Ending**: cancel/timeout stop the process group at once; when the *agent* ends the job (`complete_request` /
 `fail_request`) ADM lets its turn finish (up to 3 min, `cleanup_after`), reads its last output, then stops it and removes
 the job folder (`keep_sessions`: only `.adm`, which holds the token and configs).

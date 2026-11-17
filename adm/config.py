@@ -165,8 +165,15 @@ class Machine(BaseModel):
     username: str
     host_key: str = ""                  # pinned OpenSSH public host key (fetched, confirmed by the admin)
     kind: Literal["claude", "hermes"] = "claude"
-    default_model: str = ""             # "" = the agent's own default
-    models: list[str] = Field(default_factory=list, max_length=20)     # suggestions in the request form
+    # ADM's own default for its jobs on this machine, passed as --model (Hermes: "provider:model" -> --provider/--model).
+    # It never changes Claude Code's or Hermes' own default; "" = let the agent use its own default.
+    default_model: str = ""
+    models: list[str] = Field(default_factory=list, max_length=20)     # favourites, listed first in the request form
+    # what the agent on the machine offers (Settings -> Load models), refreshed on demand
+    available_models: list[str] = Field(default_factory=list, max_length=1500)
+    hermes_providers: list[str] = Field(default_factory=list, max_length=50)  # Hermes provider slugs with credentials
+    agent_default: str = ""            # the agent's own default model there (shown, never changed by ADM)
+    models_checked: float = 0
     permission_mode: Literal["default", "acceptEdits", "auto", "bypassPermissions", "dontAsk"] = "auto"  # Claude
     hermes_provider: str = ""           # Hermes --provider ("" = its default)
     hermes_yolo: bool = True            # Hermes: run tools without asking (nobody can answer a prompt)
@@ -211,10 +218,24 @@ class Machine(BaseModel):
     def _m(cls, v: str) -> str:
         return _model(v)
 
-    @field_validator("models")
+    @field_validator("models", "available_models", "hermes_providers")
     @classmethod
     def _ms(cls, v: list[str]) -> list[str]:
         return [m for m in (_model(x) for x in v) if m]
+
+    @field_validator("agent_default")
+    @classmethod
+    def _ad(cls, v: str) -> str:
+        return _model(v)
+
+    def split_model(self, model: str) -> tuple[str, str]:
+        """Hermes: "provider:model" -> (provider, model) when the prefix is one of its providers, else
+        (the machine's provider setting, model). Claude Code: ("", model)."""
+        if self.kind == "hermes" and ":" in model:
+            prov, _, rest = model.partition(":")
+            if prov in self.hermes_providers and rest:
+                return prov, rest
+        return (self.hermes_provider if self.kind == "hermes" else ""), model
 
     @field_validator("folder")
     @classmethod

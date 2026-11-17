@@ -57,6 +57,12 @@ class FakeSsh:
     async def test(self, m):
         return "connected; fake"
 
+    async def models(self, m):
+        if m.kind == "hermes":
+            return {"models": ["deepseek:deepseek-flash", "copilot:gpt-5.4", "bad model name!"],
+                    "providers": ["deepseek", "copilot"], "agent_default": "deepseek:deepseek-flash"}
+        return {"models": ["opus", "claude-opus-5-5"], "providers": [], "agent_default": ""}
+
     async def close_all(self):
         pass
 
@@ -226,3 +232,100 @@ def test_changing_the_host_needs_a_new_host_key(c, tmp_path):
     other = KEY.replace("AAAAIOMq", "AAAAIOMr")
     assert c.put(f"/api/machines/{m['id']}", json={"host": "10.0.0.6", "host_key": other}, headers=h).status_code == 200
     assert c.put(f"/api/machines/{m['id']}", json={"name": "renamed"}, headers=h).status_code == 200   # same host: fine
+
+
+def test_load_models_and_adm_only_default(c, tmp_path):
+    h, fake, m = setup(c, tmp_path, kind="hermes")
+    r = c.post(f"/api/machines/{m['id']}/models", headers=h).json()
+    assert r["available_models"] == ["deepseek:deepseek-flash", "copilot:gpt-5.4"]       # the odd name is dropped
+    assert r["hermes_providers"] == ["deepseek", "copilot"] and r["agent_default"] == "deepseek:deepseek-flash"
+    assert r["models_checked"] > 0
+    # ADM's default for its jobs; the request form gets favourites + everything available
+    assert c.put(f"/api/machines/{m['id']}", json={"default_model": "copilot:gpt-5.4"}, headers=h).status_code == 200
+    lst = c.get("/api/machines").json()["machines"][0]
+    assert lst["default_model"] == "copilot:gpt-5.4" and len(lst["available_models"]) == 2
+    # switching the agent type forgets the other agent's list
+    r = c.put(f"/api/machines/{m['id']}", json={"kind": "claude", "default_model": ""}, headers=h).json()
+    assert r["available_models"] == [] and r["agent_default"] == ""
+
+
+def test_hermes_provider_model_split():
+    m = Machine(name="x", host="h", username="root", kind="hermes", hermes_provider="deepseek",
+                hermes_providers=["deepseek", "copilot"])
+    assert m.split_model("copilot:gpt-5.4") == ("copilot", "gpt-5.4")
+    assert m.split_model("gpt-5.4") == ("deepseek", "gpt-5.4")              # the machine's provider setting
+    assert m.split_model("ollama:qwen3:8b") == ("deepseek", "ollama:qwen3:8b")   # unknown prefix: a model name
+    assert m.split_model("") == ("deepseek", "")
+    c = Machine(name="x", host="h", username="root", kind="claude", hermes_providers=["copilot"])
+    assert c.split_model("copilot:x") == ("", "copilot:x")
+
+
+def test_claude_model_order():
+    names = ["claude-opus-4-20250514", "claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-5-2",
+             "claude-haiku-5-5", "claude-opus-4-8", "claude-sonnet-5-5[1m]"]
+    out = sorted(names, key=sshrun.claude_model_key)
+    assert out[:3] == ["claude-opus-5-5", "claude-sonnet-5-5", "claude-sonnet-5-5[1m]"]
+    assert out.index("claude-opus-4-8") < out.index("claude-opus-4-20250514")
+
+
+async def test_claude_discovery_parses_and_filters(tmp_path):
+    r = sshrun.SshRunner(str(tmp_path), 1)
+    m = Machine(name="x", host="h", username="root", kind="claude")
+
+    async def sh(mm, cmd, input=None, timeout=30):
+        return 0, "claude-opus-5-5\nclaude-haiku-3-55\nclaude-opus-4-20250514\nclaude-sonnet-5-5\nADM-DEFAULT sonnet\n", ""
+    r.sh = sh
+    d = await r.models(m)
+    assert d["models"] == ["opus", "sonnet", "haiku", "claude-opus-5-5", "claude-sonnet-5-5", "claude-opus-4-20250514"]
+    assert d["agent_default"] == "sonnet"
+
+
+async def test_hermes_discovery_parses_the_console_output(tmp_path):
+    r = sshrun.SshRunner(str(tmp_path), 1)
+    m = Machine(name="x", host="h", username="root", kind="hermes")
+    payload = {"provider": "deepseek", "model": "deepseek-flash",
+               "providers": [{"slug": "deepseek", "models": ["deepseek-flash"]}, {"slug": "copilot", "models": ["gpt-5.4"]}]}
+
+    async def sh(mm, cmd, input=None, timeout=30):
+        assert "--run-module code" in cmd and input.startswith("exec(")
+        return 0, ">>> ADM-MODELS " + json.dumps(payload) + "\n>>> \n", ""
+    r.sh = sh
+    d = await r.models(m)
+    assert d == {"models": ["deepseek:deepseek-flash", "copilot:gpt-5.4"], "providers": ["deepseek", "copilot"],
+                 "agent_default": "deepseek:deepseek-flash"}
+
+
+async def test_hermes_launch_line_uses_provider_and_model(tmp_path):
+    r = sshrun.SshRunner(str(tmp_path), 1)
+    m = Machine(name="x", host="h", username="root", kind="hermes", hermes_provider="deepseek",
+                hermes_providers=["deepseek", "copilot"])
+    written = {}
+
+    class C:
+        home = "/root"
+
+        async def get(self, mm):
+            return None
+    r.conns[m.id] = C()
+
+    async def sh(mm, cmd, input=None, timeout=30):
+        if cmd.startswith("umask 077; cat >"):
+            written[cmd.split("> ")[1].split(".tmp")[0].strip("'")] = input
+            return 0, "", ""
+        if "echo $!" in cmd:
+            return 0, "4242\n", ""
+        if "import yaml" in cmd:
+            return 0, "python3\n", ""
+        if "ln -sfn" in cmd:
+            return 0, "/root/.hermes\n", ""
+        if ".adm-config.py" in cmd and "rm -f" not in cmd:
+            return 0, "ok\n", ""
+        return 0, "", ""
+    r.sh = sh
+    rt = await r.start_turn(m, "r_0123456789", {}, "find it", "adj_x", "copilot:gpt-5.4")
+    script = written["/root/adm-jobs/r_0123456789/.adm/run-1.sh"]
+    assert "--model gpt-5.4 --provider copilot" in script and rt["pid"] == 4242
+    rt["session"] = "h-1"                       # reported by Hermes' result event, read by poll()
+    await r.start_turn(m, "r_0123456789", rt, "go on", "", "gpt-5.4")
+    assert "--model gpt-5.4 --provider deepseek" in written["/root/adm-jobs/r_0123456789/.adm/run-2.sh"]
+    assert "--resume h-1" in written["/root/adm-jobs/r_0123456789/.adm/run-2.sh"]

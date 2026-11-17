@@ -137,7 +137,7 @@ async function pageRequests(main) {
   let kind = "movies";
   const agents = [];
   if (ms.telerouter_ready || ms.default_runner === "telerouter") agents.push({ id: "telerouter", label: "telerouter (tmux session)", models: ms.telerouter_models, def: "" });
-  for (const m of ms.machines.filter(x => x.enabled)) agents.push({ id: m.id, label: `${m.name} · ${m.kind === "hermes" ? "Hermes" : "Claude Code"} over SSH`, models: m.models, def: m.default_model });
+  for (const m of ms.machines.filter(x => x.enabled)) agents.push({ id: m.id, label: `${m.name} · ${m.kind === "hermes" ? "Hermes" : "Claude Code"} over SSH`, models: [...(m.models || []), ...(m.available_models || [])], def: m.default_model, agentDef: m.agent_default });
   const runnerSel = el("select", { name: "runner" }, agents.map(a => el("option", { value: a.id, selected: a.id === ms.default_runner }, a.label)));
   const modelList = el("datalist", { id: "model-list" });
   const modelIn = el("input", { name: "model", list: "model-list", autocomplete: "off", spellcheck: "false" });
@@ -145,7 +145,7 @@ async function pageRequests(main) {
     const a = agents.find(x => x.id === runnerSel.value) || { models: [], def: "" };
     const opts = [...new Set([a.def, ...(a.models || [])].filter(Boolean))];
     modelList.replaceChildren(...opts.map(m => el("option", { value: m })));
-    modelIn.placeholder = a.def ? `default: ${a.def}` : "agent's default";
+    modelIn.placeholder = a.def ? `default: ${a.def}` : (a.agentDef ? `agent's default: ${a.agentDef}` : "agent's default");
   }
   runnerSel.addEventListener("change", setRunner);
   const libSel = el("select", { name: "library_id" });
@@ -392,7 +392,7 @@ function splitList(v) { return String(v || "").split(/[,\s]+/).map(x => x.trim()
 function machinesPanel(ms) {
   const rows = ms.machines.map(m => el("div", { class: "row machine" },
     el("span", { class: "badge " + (m.connected ? "done" : m.error ? "failed" : "") }, m.connected ? "connected" : m.error ? "error" : "idle"),
-    el("b", {}, m.name), el("span", { class: "muted" }, `${m.username}@${m.host}:${m.port} · ${m.kind === "hermes" ? "Hermes" : "Claude Code"}${m.default_model ? " · " + m.default_model : ""}${m.enabled ? "" : " · disabled"}`),
+    el("b", {}, m.name), el("span", { class: "muted" }, `${m.username}@${m.host}:${m.port} · ${m.kind === "hermes" ? "Hermes" : "Claude Code"} · ADM default: ${m.default_model || "the agent's own"}${m.enabled ? "" : " · disabled"}`),
     el("span", { class: "spacer" }),
     el("button", { onclick: async () => { const r = await act(() => api("POST", `/api/machines/${m.id}/test`)); toast(r.message, !r.ok); } }, "Test"),
     el("button", { onclick: () => machineForm(m) }, "Edit"),
@@ -413,6 +413,30 @@ function machineForm(m) {
   const fp = el("span", { class: "hint" }, m.host_key ? `Host key: ${m.host_key_fingerprint}` : "Host key not confirmed yet.");
   const resetKey = () => { if (hostKey) { hostKey = ""; fp.textContent = "Host or port changed: fetch & confirm the host key again."; } };
   const sel = (name, value, opts) => el("select", { name }, opts.map(([v, t]) => el("option", { value: v, selected: v === value }, t)));
+  // ADM's own default model for jobs on this machine, picked from what the agent there offers
+  const avail = el("datalist", { id: "machine-models" });
+  const fillAvail = list => avail.replaceChildren(...(list || []).map(x => el("option", { value: x })));
+  fillAvail(m.available_models);
+  const availInfo = el("span", { class: "hint" });
+  const showInfo = mm => {
+    const n = (mm.available_models || []).length;
+    availInfo.textContent = (n ? `${n} models available${mm.models_checked ? ` (checked ${ago(mm.models_checked)})` : ""}. ` : "No model list loaded yet. ")
+      + (mm.agent_default ? `The agent's own default there is ${mm.agent_default}; ADM never changes it.` : "ADM never changes the agent's own default.")
+      + (mm.kind === "hermes" ? " Hermes models are provider:model." : "");
+  };
+  showInfo(m);
+  const loadBtn = el("button", { type: "button", disabled: isNew ? true : null, onclick: async () => {
+    loadBtn.disabled = true; loadBtn.textContent = "Loading…";
+    try {
+      const r = await act(() => api("POST", `/api/machines/${m.id}/models`));
+      fillAvail(r.available_models); showInfo(r);
+      toast(`${r.available_models.length} models loaded`);
+    } finally { loadBtn.disabled = false; loadBtn.textContent = "Load models from the machine"; }
+  } }, "Load models from the machine");
+  const modelPicker = el("div", { class: "field wide" },
+    el("span", { class: "label" }, "Default model for ADM jobs on this machine"),
+    el("div", { class: "row" }, el("div", { class: "grow" }, el("input", { name: "default_model", value: m.default_model, list: "machine-models", autocomplete: "off", spellcheck: "false", placeholder: "empty = the agent's own default" })), loadBtn),
+    avail, availInfo, isNew ? el("span", { class: "hint" }, "Save the machine first, then load its models.") : null);
   const f = el("div", { class: "panel" }, el("h2", {}, isNew ? "Add agent machine" : `Edit ${m.name}`),
     el("div", { class: "form" },
       field("Name", el("input", { name: "name", value: m.name, placeholder: "e.g. claude LXC" })),
@@ -420,8 +444,8 @@ function machineForm(m) {
       field("SSH port", el("input", { name: "port", type: "number", value: m.port, oninput: resetKey })),
       field("SSH user", el("input", { name: "username", value: m.username })),
       field("Agent", sel("kind", m.kind, [["claude", "Claude Code"], ["hermes", "Hermes Agent"]])),
-      field("Default model", el("input", { name: "default_model", value: m.default_model, placeholder: "empty = the agent's default" })),
-      field("Model suggestions", el("input", { name: "models", value: (m.models || []).join(", "), placeholder: "claude-sonnet-5-5, claude-opus-5-5" }), "Comma-separated; shown in the request form."),
+      modelPicker,
+      field("Favourite models", el("input", { name: "models", value: (m.models || []).join(", "), placeholder: "claude-sonnet-5-5, copilot:gpt-5.4" }), "Comma-separated; listed first in the request form."),
       field("Permission mode (Claude Code)", sel("permission_mode", m.permission_mode, [["auto", "auto"], ["acceptEdits", "acceptEdits"], ["bypassPermissions", "bypassPermissions"], ["dontAsk", "dontAsk"], ["default", "default (asks - nobody answers)"]])),
       field("Provider (Hermes)", el("input", { name: "hermes_provider", value: m.hermes_provider, placeholder: "empty = Hermes' default" })),
       field("Job folders", el("input", { name: "folder", value: m.folder })),

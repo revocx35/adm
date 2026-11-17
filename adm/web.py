@@ -24,7 +24,7 @@ from starlette.requests import ClientDisconnect
 
 from . import library, security, tls
 from .app_state import State
-from .config import (AgentSettings, Admin, Jellyfin, Library, Machine, SecuritySettings, Telerouter, merge_secrets,
+from .config import (MODEL_RE, AgentSettings, Admin, Jellyfin, Library, Machine, SecuritySettings, Telerouter, merge_secrets,
                      redact)
 from .jobs import Jobs
 from .mcp import McpServer
@@ -559,6 +559,9 @@ def create_app(settings: Settings, files: tls.TlsFiles) -> FastAPI:
         data = {**old.model_dump(), **{k: v for k, v in payload.items() if k not in ("connected", "error")}, "id": mid}
         m = _validate(Machine, data)
         check_machine(m)
+        if m.kind != old.kind:              # another agent offers other models
+            m = m.model_copy(update={"available_models": [], "hermes_providers": [], "agent_default": "",
+                                     "models_checked": 0})
         if (m.host, m.port) != (old.host, old.port) and m.host_key and m.host_key == old.host_key:
             # a key confirmed for another address must not be trusted for this one
             raise HTTPException(422, "the host or port changed: fetch & confirm its host key again")
@@ -586,6 +589,23 @@ def create_app(settings: Settings, files: tls.TlsFiles) -> FastAPI:
         except (OSError, SshError, TimeoutError, Exception) as e:
             raise HTTPException(502, f"could not fetch the host key: {e.__class__.__name__}") from e
         return {"host_key": key, "fingerprint": fingerprint(key)}
+
+    @app.post("/api/machines/{mid}/models")
+    async def machine_models(mid: str):
+        """Ask the agent on the machine which models it offers and remember the list (for the pickers)."""
+        m = find_machine(mid)
+        try:
+            found = await jobs.ssh.models(m)
+        except SshError as e:
+            raise HTTPException(502, str(e)) from e
+        ok = [x for x in found["models"] if MODEL_RE.match(x)][:1500]       # never let one odd name block the list
+        new = _validate(Machine, {**m.model_dump(), "available_models": ok,
+                                  "hermes_providers": [x for x in found["providers"] if MODEL_RE.match(x)][:50],
+                                  "agent_default": found["agent_default"] if MODEL_RE.match(found["agent_default"]) else "",
+                                  "models_checked": time.time()})
+        cfg.machines[cfg.machines.index(m)] = new
+        store.save()
+        return machine_info(new)
 
     @app.post("/api/machines/{mid}/test")
     async def machine_test(mid: str):

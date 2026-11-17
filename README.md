@@ -76,7 +76,14 @@ MCP server (`--strict-mcp-config`); Hermes as `hermes chat --oneshot --format st
 Hermes config is never changed). Reminders and your messages continue the same agent session. The job folder is deleted
 when the job ends (*Keep finished jobs' sessions and job folders* keeps it, minus the job's secrets).
 
-In the request form pick the **Agent** and type or pick a **Model**; *Settings → Agent → Default agent* sets the default.
+**Models**: *Load models from the machine* asks the agent there what it offers - Claude Code: the model names the
+installed version knows (newest first, plus `opus`/`sonnet`/`haiku`); Hermes: the models of every provider you are
+logged in to, written `provider:model` (e.g. `copilot:gpt-5.4`; ADM starts Hermes with `--provider copilot --model
+gpt-5.4`). *Default model for ADM jobs on this machine* is picked from that list and applies to ADM's jobs only: the
+agent's own default (shown next to it) is never changed. Empty = the agent's own default.
+
+In the request form pick the **Agent** and type or pick a **Model** (favourites first, then everything the machine
+offers); *Settings → Agent → Default agent* sets the default.
 
 ## Behind a reverse proxy / single sign-on
 

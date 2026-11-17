@@ -32,7 +32,7 @@ The checkout folder may be called `agm` (an early typo of the name); the product
 
 ```bash
 docker build -t adm-dev -f Dockerfile.dev .
-docker run --rm -v $PWD:/src -w /src adm-dev python -m pytest -q        # ~5 s, 43 tests
+docker run --rm -v $PWD:/src -w /src adm-dev python -m pytest -q        # ~5 s, 49 tests
 docker build -t adm:dev .                                                # the runtime image
 docker run -d --name adm-test --network host --user 1000:1000 --read-only --tmpfs /tmp \
   -e ADM_HTTPS_PORT=18450 -e ADM_BIND=127.0.0.1 -e ADM_SETUP_CODE=TEST-CODE1 -v $PWD/scratch/data:/data adm:dev
@@ -88,7 +88,15 @@ Remove test containers when done. Host-specific rules (resource limits, hosts, m
   `complete_request` inside that turn, so `_check` re-reads the request before nudging.
 - `TestClient.portal.call(jobs.tick)` runs a tick on the app's loop; tests patch `Jobs.start` so no background loop races.
 
-## Status (0.2.1, 2026-11-17)
+## Status (0.3.0, 2026-11-17)
+
+0.3.0 (owner: "an default model setting for each machine ... the default for adm only not the hermes/claude code
+default and it should have an list off all available models on claude code/hermes"): *Load models from the machine*
+(Claude Code: names in the installed CLI; Hermes: its own provider/model picker via `hermes --run-module code`),
+*Default model for ADM jobs* picked from it, Hermes models as `provider:model` -> `--provider/--model`, the request
+form lists favourites + everything available. Both discovery scripts were run against the real Claude Code 2.1.326
+(34 names) and Hermes 0.22.4 (3 providers). 49 tests.
+
 
 0.2.1 (owner: "Host key is not trusted for host <the agent machine>" after fixing a mistyped IP): the key had been fetched for
 the wrong address and kept. Changing a machine's host/port now clears the confirmed key in the form and the API refuses
