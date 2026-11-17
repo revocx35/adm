@@ -141,6 +141,10 @@ class Conn:
                     conn = await asyncio.wait_for(asyncssh.connect(
                         m.host, m.port, username=m.username, client_keys=[self.keys.key], known_hosts=known,
                         agent_path=None, keepalive_interval=KEEPALIVE_S, keepalive_count_max=KEEPALIVE_MAX), 20)
+                except asyncssh.HostKeyNotVerifiable as e:
+                    self.error = ("its host key does not match the one ADM confirmed - Edit the machine, "
+                                  "Fetch & confirm host key again (compare the fingerprint), Save")
+                    raise SshError(f"{m.name}: {self.error}") from e
                 except asyncssh.PermissionDenied as e:
                     self.error = "ADM's SSH key is not in authorized_keys"
                     raise SshError(f"{m.name}: {self.error}") from e

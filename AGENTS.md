@@ -32,7 +32,7 @@ The checkout folder may be called `agm` (an early typo of the name); the product
 
 ```bash
 docker build -t adm-dev -f Dockerfile.dev .
-docker run --rm -v $PWD:/src -w /src adm-dev python -m pytest -q        # ~5 s, 42 tests
+docker run --rm -v $PWD:/src -w /src adm-dev python -m pytest -q        # ~5 s, 43 tests
 docker build -t adm:dev .                                                # the runtime image
 docker run -d --name adm-test --network host --user 1000:1000 --read-only --tmpfs /tmp \
   -e ADM_HTTPS_PORT=18450 -e ADM_BIND=127.0.0.1 -e ADM_SETUP_CODE=TEST-CODE1 -v $PWD/scratch/data:/data adm:dev
@@ -88,7 +88,12 @@ Remove test containers when done. Host-specific rules (resource limits, hosts, m
   `complete_request` inside that turn, so `_check` re-reads the request before nudging.
 - `TestClient.portal.call(jobs.tick)` runs a tick on the app's loop; tests patch `Jobs.start` so no background loop races.
 
-## Status (0.2.0, 2026-11-17)
+## Status (0.2.1, 2026-11-17)
+
+0.2.1 (owner: "Host key is not trusted for host <the agent machine>" after fixing a mistyped IP): the key had been fetched for
+the wrong address and kept. Changing a machine's host/port now clears the confirmed key in the form and the API refuses
+the old key for a new address; a mismatch says to fetch & confirm again. 43 tests.
+
 
 0.2.0 (owner: "add support for independent agents than telerouter so the ADM sshs into the machine itself and creates an
 session (not tmux since its an temporary session) also ... hermes agent and model selection"): agent machines over

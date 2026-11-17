@@ -411,12 +411,13 @@ function machineForm(m) {
     hermes_provider: "", hermes_yolo: true, folder: "~/adm-jobs", tunnel_port: 47900, enabled: true };
   let hostKey = m.host_key;
   const fp = el("span", { class: "hint" }, m.host_key ? `Host key: ${m.host_key_fingerprint}` : "Host key not confirmed yet.");
+  const resetKey = () => { if (hostKey) { hostKey = ""; fp.textContent = "Host or port changed: fetch & confirm the host key again."; } };
   const sel = (name, value, opts) => el("select", { name }, opts.map(([v, t]) => el("option", { value: v, selected: v === value }, t)));
   const f = el("div", { class: "panel" }, el("h2", {}, isNew ? "Add agent machine" : `Edit ${m.name}`),
     el("div", { class: "form" },
       field("Name", el("input", { name: "name", value: m.name, placeholder: "e.g. claude LXC" })),
-      field("SSH host", el("input", { name: "host", value: m.host, placeholder: "192.168.1.20" })),
-      field("SSH port", el("input", { name: "port", type: "number", value: m.port })),
+      field("SSH host", el("input", { name: "host", value: m.host, placeholder: "192.168.1.20", oninput: resetKey })),
+      field("SSH port", el("input", { name: "port", type: "number", value: m.port, oninput: resetKey })),
       field("SSH user", el("input", { name: "username", value: m.username })),
       field("Agent", sel("kind", m.kind, [["claude", "Claude Code"], ["hermes", "Hermes Agent"]])),
       field("Default model", el("input", { name: "default_model", value: m.default_model, placeholder: "empty = the agent's default" })),

@@ -217,3 +217,12 @@ def test_a_fast_agent_finishing_during_the_start_is_not_overwritten(c, tmp_path)
     j = c.get(f"/api/requests/{rid}").json()["request"]
     assert j["state"] == "failed"
     assert "cleanup_after" in c.app.state.st.db.runtime(rid)
+
+
+def test_changing_the_host_needs_a_new_host_key(c, tmp_path):
+    h, fake, m = setup(c, tmp_path)
+    r = c.put(f"/api/machines/{m['id']}", json={"host": "10.0.0.6"}, headers=h)
+    assert r.status_code == 422 and "host key again" in r.json()["detail"]
+    other = KEY.replace("AAAAIOMq", "AAAAIOMr")
+    assert c.put(f"/api/machines/{m['id']}", json={"host": "10.0.0.6", "host_key": other}, headers=h).status_code == 200
+    assert c.put(f"/api/machines/{m['id']}", json={"name": "renamed"}, headers=h).status_code == 200   # same host: fine

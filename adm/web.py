@@ -559,6 +559,9 @@ def create_app(settings: Settings, files: tls.TlsFiles) -> FastAPI:
         data = {**old.model_dump(), **{k: v for k, v in payload.items() if k not in ("connected", "error")}, "id": mid}
         m = _validate(Machine, data)
         check_machine(m)
+        if (m.host, m.port) != (old.host, old.port) and m.host_key and m.host_key == old.host_key:
+            # a key confirmed for another address must not be trusted for this one
+            raise HTTPException(422, "the host or port changed: fetch & confirm its host key again")
         cfg.machines[cfg.machines.index(old)] = m
         store.save()
         await jobs.ssh._conn(m).close()          # reconnect with the new settings
