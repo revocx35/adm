@@ -61,7 +61,7 @@ deleted after the import.
 | | telerouter | ADM's own SSH ("agent machines") |
 |---|---|---|
 | Session | a tmux session telerouter starts (watch it on telerouter's tmux page) | a one-off background process per job, no tmux |
-| Agents | Claude Code | Claude Code (Hermes Agent: switched off for now, see below) |
+| Agents | Claude Code | Claude Code **or Hermes Agent** |
 | How the agent reaches ADM | ADM's address (`https://…`, ADM's CA trusted by the agent) | an SSH reverse tunnel: `http://127.0.0.1:<port>` on the agent's machine, no route or certificate needed |
 | Model | optional per request (telerouter ≥ 0.18), else the machine's new-session model | per request, else the machine's default model |
 
@@ -72,14 +72,14 @@ fingerprint) and *Test*. The agent must be logged in on that machine for that us
 
 Each job runs in `<job folders>/<request id>/`: Claude Code as `claude -p --output-format stream-json` with only ADM's
 MCP server (`--strict-mcp-config`); Hermes as `hermes chat --oneshot --format stream-json` with its own temporary
-`HERMES_HOME` (your `~/.hermes` linked in, `config.yaml` copied with only ADM's MCP server and without hooks; your own
-Hermes config is never changed). Reminders and your messages continue the same agent session. The job folder is deleted
+`HERMES_HOME` (an allowlist of links into your `~/.hermes`, `config.yaml` copied with only ADM's MCP server; see below). Reminders and your messages continue the same agent session. The job folder is deleted
 when the job ends (*Keep finished jobs' sessions and job folders* keeps it, minus the job's secrets).
 
-**Hermes Agent is switched off for now.** Hermes 0.22's `hermes chat` hands every conversation to the running Hermes
-gateway, which uses its own settings, so a job would not get ADM's tools (and would get the gateway's tool connections
-instead). ADM refuses Hermes jobs with that explanation until a job can run isolated from the gateway. Loading
-Hermes' models still works.
+**Hermes jobs run isolated from your own Hermes.** Hermes' `hermes chat` always works through a gateway. ADM gives
+each job its own Hermes home - your credentials, the install and skills linked in, a copy of your `config.yaml` with
+only ADM's MCP server, no hooks/cron/kanban - and deliberately *not* your gateway's lock, so Hermes starts a separate,
+short-lived gateway just for that job (it quits a minute after the job). Your running gateway, its tools, sessions,
+cron and messaging are not involved. Cancelling a job stops that job gateway too.
 
 **Models**: *Load models from the machine* asks the agent there what it offers - Claude Code: the model names the
 installed version knows (newest first, plus `opus`/`sonnet`/`haiku`); Hermes: the models of every provider you are

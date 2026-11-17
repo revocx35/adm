@@ -124,12 +124,11 @@ def test_request_runs_over_ssh_with_the_chosen_model(c, tmp_path):
     assert "list_library" in c.get(f"/api/requests/{rid}/screen").json()["screen"]
 
 
-def test_hermes_jobs_are_refused_for_now(c, tmp_path):
+def test_hermes_jobs_run_again(c, tmp_path):
     h, fake, m = setup(c, tmp_path, kind="hermes")
     rid = c.post("/api/requests", headers=h, json={"kind": "movies", "title": "Dune", "runner": m["id"]}).json()["id"]
     tick(c)
-    j = c.get(f"/api/requests/{rid}").json()["request"]
-    assert j["state"] == "failed" and "gateway" in j["error"] and fake.turns == []
+    assert c.get(f"/api/requests/{rid}").json()["request"]["state"] == "working" and fake.turns[0]["kind"] == "hermes"
 
 
 def test_default_model_reminders_and_owner_messages(c, tmp_path):
@@ -327,9 +326,12 @@ async def test_hermes_launch_line_uses_provider_and_model(tmp_path):
             return 0, "4242\n", ""
         if "import yaml" in cmd:
             return 0, "python3\n", ""
-        if "ln -sfn" in cmd:
-            return 0, "/root/.hermes\n", ""
-        if ".adm-config.py" in cmd and "rm -f" not in cmd:
+        if "HERMES_HOME:-" in cmd:
+            return 0, "/root/.hermes", ""
+        if ".adm-home.py" in cmd and "rm -f" not in cmd:
+            payload = json.loads(input)
+            assert payload["src"] == "/root/.hermes" and payload["dst"].endswith("/.adm/hermes-home")
+            assert payload["url"] == "http://127.0.0.1:47900/mcp" and payload["token"] == "adj_x"
             return 0, "ok\n", ""
         return 0, "", ""
     r.sh = sh
@@ -389,11 +391,47 @@ async def test_launch_lost_answer_reads_the_pid_file(tmp_path):
     assert rt["pid"] == 4343
 
 
-def test_a_running_hermes_job_from_before_is_closed(c, tmp_path):
-    h, fake, m = setup(c, tmp_path, kind="hermes")
-    st = c.app.state.st
-    j = st.db.new_request("movies", "Dune", "", "", "", st.store.config.libraries[0].id, runner=m["id"])
-    st.db.update(j["id"], state="starting", started=__import__("time").time())
-    tick(c)
-    r = c.get(f"/api/requests/{j['id']}").json()["request"]
-    assert r["state"] == "failed" and "switched off" in r["error"]
+def test_hermes_home_builder_isolates_the_job(tmp_path):
+    """The script ADM runs on the machine: an allowlist of links, never the gateway lock, a private config."""
+    import subprocess, sys, yaml
+    src, dst = tmp_path / "hermes", tmp_path / "job" / "hermes-home"
+    src.mkdir()
+    for f in (".env", "auth.json", "gateway.lock", "gateway.sock", "state.db"):
+        (src / f).write_text("x")
+    for d in ("skills", "cron", "kanban", "memories", "sessions"):
+        (src / d).mkdir()
+    (src / "config.yaml").write_text(yaml.safe_dump({
+        "model": {"default": "deepseek-flash", "provider": "deepseek"},
+        "mcp_servers": {"telerouter": {"url": "http://127.0.0.1:47801/mcp"}},
+        "hooks": {"post_llm_call": [{"command": "/x"}]}, "cron": {"catch_up_missed": True},
+        "kanban": {"review_dispatch": True}, "gateway": {"unmanaged_idle_exit_seconds": 600}}))
+    out = subprocess.run([sys.executable, "-c", sshrun.HERMES_CONFIG_PY], input=json.dumps(
+        {"src": str(src), "dst": str(dst), "url": "http://127.0.0.1:47900/mcp", "token": "adj_T"}),
+        capture_output=True, text=True)
+    assert out.stdout.strip() == "ok", out.stderr
+    names = sorted(p.name for p in dst.iterdir())
+    assert names == [".env", "auth.json", "config.yaml", "skills"]          # no gateway.*, state, cron, kanban ...
+    cfg = yaml.safe_load((dst / "config.yaml").read_text())
+    assert cfg["mcp_servers"] == {"adm": {"url": "http://127.0.0.1:47900/mcp",
+                                          "headers": {"Authorization": "Bearer adj_T"}, "timeout": 900}}
+    assert "hooks" not in cfg and "cron" not in cfg and "kanban" not in cfg
+    assert cfg["model"]["provider"] == "deepseek" and cfg["gateway"]["unmanaged_idle_exit_seconds"] == 60
+    assert oct((dst / "config.yaml").stat().st_mode & 0o777) == "0o600"
+
+
+async def test_stop_also_ends_the_job_gateway_and_leftovers(tmp_path):
+    r = sshrun.SshRunner(str(tmp_path), 1)
+    got = []
+
+    async def sh(m, cmd, input=None, timeout=30):
+        got.append(cmd)
+        return 0, "", ""
+    r.sh = sh
+    await r.stop(Machine(name="x", host="h", username="root"), {"pid": 4242, "dir": "/root/adm-jobs/r_0123456789"})
+    cmd = got[0]
+    assert "kill -TERM -- -4242" in cmd
+    assert "grep -qx HERMES_HOME=/root/adm-jobs/r_0123456789/.adm/hermes-home" in cmd    # only this job's gateway
+    assert "/root/adm-jobs/r_0123456789/*" in cmd
+    got.clear()
+    await r.stop(Machine(name="x", host="h", username="root"), {"pid": 4242, "dir": "/etc"})    # never outside a job dir
+    assert "HERMES_HOME" not in got[0] and "/etc" not in got[0]

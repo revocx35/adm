@@ -163,16 +163,6 @@ class Jobs:
                        if not (cfg.telerouter.url and cfg.telerouter.token) else "")
         else:
             problem = ("its agent machine was removed" if not m else f"{m.name} is disabled" if not m.enabled else "")
-            if m and m.kind == "hermes":
-                # Hermes 0.22's `hermes chat` hands the conversation to the user's running gateway, which uses its own
-                # config: the job would run without ADM's tools and with the user's MCP servers (seen 2026-11-17).
-                # Refused until a job can run isolated from that gateway.
-                db.update(j["id"], state="failed", finished=time.time(), stage="failed",
-                          error="Hermes jobs are switched off for now: Hermes hands each job to your running Hermes "
-                                "gateway, which uses its own settings instead of the job's, so the agent would not get "
-                                "ADM's tools. Use a Claude Code machine meanwhile.")
-                db.event(j["id"], "state", "failed: Hermes jobs are switched off for now")
-                return
         problem = "its library was removed" if not lib else problem
         if problem:
             db.update(j["id"], message=f"waiting: {problem}")
@@ -292,11 +282,6 @@ class Jobs:
             return
         if self._timed_out(j):
             await self.finish(j["id"], "failed", error=f"timed out after {cfg.agent.job_timeout_hours:g} h")
-            return
-        if m.kind == "hermes":                       # see _start: Hermes jobs are switched off for now
-            await self.finish(j["id"], "failed", error="Hermes jobs are switched off for now: Hermes hands each job to "
-                              "your running Hermes gateway, which uses its own settings instead of the job's, so the "
-                              "agent would not get ADM's tools. Use a Claude Code machine meanwhile.")
             return
         rt = db.runtime(j["id"])
         if not rt.get("pid"):

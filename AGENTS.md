@@ -32,7 +32,7 @@ The checkout folder may be called `agm` (an early typo of the name); the product
 
 ```bash
 docker build -t adm-dev -f Dockerfile.dev .
-docker run --rm -v $PWD:/src -w /src adm-dev python -m pytest -q        # ~8 s, 53 tests
+docker run --rm -v $PWD:/src -w /src adm-dev python -m pytest -q        # ~8 s, 54 tests
 docker build -t adm:dev .                                                # the runtime image
 docker run -d --name adm-test --network host --user 1000:1000 --read-only --tmpfs /tmp \
   -e ADM_HTTPS_PORT=18450 -e ADM_BIND=127.0.0.1 -e ADM_SETUP_CODE=TEST-CODE1 -v $PWD/scratch/data:/data adm:dev
@@ -80,9 +80,12 @@ Remove test containers when done. Host-specific rules (resource limits, hosts, m
 - **Hermes 0.22 `hermes chat` is a gateway client** (`--format stream-json` always goes through
   `launch_gateway_chat`): with the user's gateway running, the job's turn runs *inside that gateway with the gateway's
   config* - not the job's HERMES_HOME config, so no ADM tools and the user's MCP servers instead. Killing the client only
-  detaches ("accepted work continues at the gateway"). Hermes jobs are refused (`Jobs._start`/`_check_ssh`) until a job
-  can run isolated from that gateway.
-- Hermes keeps MCP servers only in config.yaml: never edit the user's; the job's HERMES_HOME links everything else.
+  detaches ("accepted work continues at the gateway"). Since 0.4.0 the job home links only an allowlist
+  and never `gateway.lock` ("a per-task overlay home is served by the profile its symlinked lock names"), so the client
+  starts its own `gateway run --idle-exit` for the job home with the job's config. `stop()` ends that gateway (matched by
+  `HERMES_HOME` in /proc/<pid>/environ) and every process whose cwd is in the job folder.
+- Hermes keeps MCP servers only in config.yaml: never edit the user's; the job's HERMES_HOME links an allowlist only
+  (never gateway.lock/sock/state, cron, kanban, sessions, memories, platforms, hooks).
 - e2e: `docker build -t adm-fake-agent tools/fake-agent`, run it with `--network host -e SSH_PORT=2222
   -e AUTHORIZED_KEY=...`, run ADM with `ADM_INTERNAL_PORT` set, add machines with distinct tunnel ports.
 
@@ -97,7 +100,14 @@ Remove test containers when done. Host-specific rules (resource limits, hosts, m
   `complete_request` inside that turn, so `_check` re-reads the request before nudging.
 - `TestClient.portal.call(jobs.tick)` runs a tick on the app's loop; tests patch `Jobs.start` so no background loop races.
 
-## Status (0.3.1, 2026-11-17)
+## Status (0.4.0, 2026-11-17)
+
+0.4.0 (owner: "can you try fixing hermes"): isolated Hermes jobs (allowlist home, no gateway lock -> own short-lived
+gateway with only ADM's MCP server), stop() ends the job gateway and leftovers, Hermes jobs back on. Verified on the real
+Hermes 0.22.4 (CT 123) by hand: a run in such a home was served by a new `gateway run --idle-exit` with HERMES_HOME = the
+job home (not the user's gateway), saw no MCP server of the user's ("NONE"), and that gateway exited once idle. Not yet run
+as a full ADM job (needs the deploy). 54 tests.
+
 
 0.3.1 (owner: "i got an timeout error"): the first real Hermes job started three times (see the launch gotcha) and ran
 inside the owner's Hermes gateway. Launch fixed (detached, pid file, adopt, no re-start), Hermes jobs switched off with

@@ -85,8 +85,8 @@ job fails. Next turns resume the agent's session (`claude --resume <uuid>` with 
 
 | | Claude Code | Hermes |
 |---|---|---|
-| launch | `claude -p --output-format stream-json --verbose --strict-mcp-config --mcp-config .adm/mcp.json --settings .adm/settings.json [--model] [--permission-mode] --session-id/--resume`, prompt on stdin | (switched off since 0.3.1: `hermes chat` hands the turn to the user's running gateway, which ignores the job's HERMES_HOME config) `HERMES_HOME=.adm/hermes-home hermes chat --query-file .adm/prompt-N.txt --oneshot --format stream-json [--model] [--provider] [--yolo] [--resume]` |
-| ADM's MCP server | `.adm/mcp.json` (bearer job token, 0600); `permissions.allow: mcp__adm`; other MCP servers off | the job's `HERMES_HOME`: symlinks to everything in `~/.hermes` except `config.yaml`, which is a copy with `mcp_servers` = only `adm` and `hooks` removed (written by Hermes' own Python, which has PyYAML) |
+| launch | `claude -p --output-format stream-json --verbose --strict-mcp-config --mcp-config .adm/mcp.json --settings .adm/settings.json [--model] [--permission-mode] --session-id/--resume`, prompt on stdin | `HERMES_HOME=.adm/hermes-home hermes chat --query-file .adm/prompt-N.txt --oneshot --format stream-json [--model] [--provider] [--yolo] [--resume]` |
+| ADM's MCP server | `.adm/mcp.json` (bearer job token, 0600); `permissions.allow: mcp__adm`; other MCP servers off | the job's `HERMES_HOME` (`HERMES_CONFIG_PY`, run with Hermes' own Python): links only `.env`, `auth.json`/`auth.lock`, `hermes-agent`, `tools`, `skills`, the model catalogue, `SOUL.md`; `config.yaml` = a copy with `mcp_servers` = only `adm`, no hooks/cron/kanban, `gateway.unmanaged_idle_exit_seconds: 60`. **Never the gateway lock**: Hermes 0.22's `hermes chat` is a gateway client and a home whose `gateway.lock` is a symlink is served by the gateway it names (the user's, with the user's config). Without it the client starts a separate `gateway run --idle-exit` for the job home |
 
 **Models** (`SshRunner.models`, `POST /api/machines/{id}/models`, stored as `available_models` /
 `hermes_providers` / `agent_default` on the machine): Claude Code has no list command, so ADM greps the installed
@@ -98,7 +98,9 @@ model is `provider:model` (`Machine.split_model`: the prefix counts only if it i
 ids can contain `:`); the machine's *Provider* setting applies to bare model names. ADM's `default_model` is only
 ADM's: passed per job as `--model` (and `--provider`), never written into the agent's config.
 
-**Ending**: cancel/timeout stop the process group at once; when the *agent* ends the job (`complete_request` /
+**Ending**: cancel/timeout stop the process group at once - plus, for Hermes, the job's own gateway (found by
+`HERMES_HOME=<job home>` in its environment; killing the client only detaches) and any helper still working in the job
+folder; when the *agent* ends the job (`complete_request` /
 `fail_request`) ADM lets its turn finish (up to 3 min, `cleanup_after`), reads its last output, then stops it and removes
 the job folder (`keep_sessions`: only `.adm`, which holds the token and configs).
 

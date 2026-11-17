@@ -42,17 +42,38 @@ KEEPALIVE_MAX = 9                 # a Proxmox backup in suspend mode can freeze 
 SCREEN_LINES = 400
 PATHS = 'PATH="$HOME/.local/bin:$HOME/bin:$HOME/.npm-global/bin:/usr/local/bin:$PATH"; export PATH'
 
-# Runs on the machine (stdin: JSON {src, dst, url, token}): the job's Hermes config.yaml.
-HERMES_CONFIG_PY = r'''import json, sys, os
+# Runs on the machine (stdin: JSON {src, dst, url, token}): the job's own Hermes home.
+# Hermes 0.22's `hermes chat` is a client of a gateway: a home whose gateway.lock is a symlink is served by the gateway
+# that lock names - linking all of ~/.hermes handed ADM's jobs to the user's running gateway, with the user's config
+# (no ADM tools, the user's MCP servers; 2026-11-17). So the home links only an allowlist (credentials, the install, its
+# runtime, skills, the model catalogue) and gets its own config: the client then starts a separate, short-lived gateway
+# for this home (`gateway run --idle-exit`), with only ADM's MCP server, and its own sessions/cron/memories in the home.
+# Verified on Hermes 0.22.4: a run in such a home is served by a new gateway with HERMES_HOME = the job home and sees
+# no MCP server of the user's; the gateway exits once idle.
+HERMES_CONFIG_PY = r'''import json, os, sys
 import yaml
 a = json.load(sys.stdin)
+src, dst = a["src"], a["dst"]
+os.makedirs(dst, mode=0o700, exist_ok=True)
+LINK = [".env", "auth.json", "auth.lock", "hermes-agent", "tools", "skills", "models_dev_cache.json",
+        "models_dev_cache.etag", "SOUL.md"]
+for name in LINK:
+    s, d = os.path.join(src, name), os.path.join(dst, name)
+    if os.path.lexists(s) and not os.path.lexists(d):
+        os.symlink(s, d)
+if os.path.lexists(os.path.join(dst, "gateway.lock")):
+    raise SystemExit("the job home must not contain a gateway lock")
 cfg = {}
-if os.path.exists(a["src"]):
-    with open(a["src"]) as f:
+if os.path.exists(os.path.join(src, "config.yaml")):
+    with open(os.path.join(src, "config.yaml")) as f:
         cfg = yaml.safe_load(f) or {}
-cfg.pop("hooks", None)
+for k in ("hooks", "kanban", "cron", "mcp_servers"):
+    cfg.pop(k, None)
 cfg["mcp_servers"] = {"adm": {"url": a["url"], "headers": {"Authorization": "Bearer " + a["token"]}, "timeout": 900}}
-fd = os.open(a["dst"], os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+gw = cfg.get("gateway") if isinstance(cfg.get("gateway"), dict) else {}
+gw["unmanaged_idle_exit_seconds"] = 60
+cfg["gateway"] = gw
+fd = os.open(os.path.join(dst, "config.yaml"), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
 with os.fdopen(fd, "w") as f:
     yaml.safe_dump(cfg, f, sort_keys=False)
 print("ok")
@@ -393,20 +414,17 @@ class SshRunner:
         code, py, _e = await self.sh(m, f"{PATHS}; {FIND_PY}")
         if code or not py.strip():
             raise SshError(f"{m.name}: no Python with PyYAML for the job's Hermes config")
-        src_dir = '"${HERMES_HOME:-$HOME/.hermes}"'
-        code, _o, err = await self.sh(m, (
-            f"umask 077; mkdir -p {q(home)} && S={src_dir} && for f in \"$S\"/* \"$S\"/.env; do "
-            f"[ -e \"$f\" ] || continue; n=$(basename \"$f\"); [ \"$n\" = config.yaml ] && continue; "
-            f"ln -sfn \"$f\" {q(home)}/\"$n\"; done && echo \"$S\""))
-        if code:
-            raise SshError(f"could not prepare the Hermes home on {m.name}: {err.strip()[:200]}")
-        src = _o.strip().splitlines()[-1] if _o.strip() else ""
-        payload = json.dumps({"src": f"{src}/config.yaml", "dst": f"{home}/config.yaml", "url": url, "token": token})
-        await self._write(m, f"{home}/.adm-config.py", HERMES_CONFIG_PY)
-        code, out, err = await self.sh(m, f"{q(py.strip())} {q(home + '/.adm-config.py')}", input=payload)
-        await self.sh(m, f"rm -f {q(home + '/.adm-config.py')}")
+        _c, src, _e = await self.sh(m, 'printf %s "${HERMES_HOME:-$HOME/.hermes}"')
+        src = src.strip()
+        if not src.startswith("/"):
+            raise SshError(f"{m.name}: can't find the Hermes home")
+        payload = json.dumps({"src": src, "dst": home, "url": url, "token": token})
+        tmp = f"{home}.adm-home.py"
+        await self._write(m, tmp, HERMES_CONFIG_PY)
+        code, out, err = await self.sh(m, f"{q(py.strip())} {q(tmp)}", input=payload)
+        await self.sh(m, f"rm -f {q(tmp)}")
         if code or "ok" not in out:
-            raise SshError(f"could not write the job's Hermes config on {m.name}: {err.strip()[-200:]}")
+            raise SshError(f"could not prepare the job's Hermes home on {m.name}: {err.strip()[-200:]}")
 
     async def poll(self, m: Machine, rt: dict) -> tuple[dict, dict | None]:
         """Read new output. Returns (runtime, turn_result or None while the turn runs).
@@ -452,9 +470,24 @@ class SshRunner:
         return rt, result
 
     async def stop(self, m: Machine, rt: dict) -> None:
+        """Stop the job's turn - and, for Hermes, the job's own gateway (killing the client only detaches: "accepted
+        work continues at the gateway") - and anything still working in the job folder."""
         pid = int(rt.get("pid") or 0)
+        d = rt.get("dir") or ""
+        cmds = []
         if pid > 1:
-            await self.sh(m, f"kill -TERM -- -{pid} 2>/dev/null || kill -TERM {pid} 2>/dev/null; true")
+            cmds.append(f"kill -TERM -- -{pid} 2>/dev/null || kill -TERM {pid} 2>/dev/null")
+        if re.match(r"^/[A-Za-z0-9_./-]+/r_[0-9a-f]{10}$", d):
+            home = f"{d}/.adm/hermes-home"
+            # the job gateway: its environment names the job's HERMES_HOME (never the user's gateway: other home)
+            cmds.append(f"for p in $(pgrep -f 'gateway run' 2>/dev/null); do "
+                        f"tr '\\0' '\\n' < /proc/$p/environ 2>/dev/null | grep -qx {q('HERMES_HOME=' + home)} && "
+                        f"kill -TERM $p; done")
+            # helper shells the agent left working in the job folder (they outlive a killed agent)
+            cmds.append(f"for p in $(ls /proc | grep -E '^[0-9]+$'); do c=$(readlink /proc/$p/cwd 2>/dev/null) || continue; "
+                        f"case \"$c\" in {q(d)}|{q(d)}/*) [ $p != $$ ] && kill -TERM $p 2>/dev/null;; esac; done")
+        if cmds:
+            await self.sh(m, "; ".join(cmds) + "; true", timeout=60)
 
     async def cleanup(self, m: Machine, rt: dict, keep: bool) -> None:
         """Always remove .adm (job token, configs); the whole job folder too unless keep."""
